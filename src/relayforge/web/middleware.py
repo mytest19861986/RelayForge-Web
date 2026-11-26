@@ -74,7 +74,7 @@ class SecurityMiddleware:
         else:
             response = self.get_response(request)
         response["X-Correlation-ID"] = cid
-        response["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
+        response.setdefault("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
         response["X-Content-Type-Options"] = "nosniff"
         response["Referrer-Policy"] = "same-origin"
         if request.path.startswith(API + "/"):

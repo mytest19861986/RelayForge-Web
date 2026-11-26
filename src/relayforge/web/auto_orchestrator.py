@@ -100,3 +100,45 @@ def rewrite(request, workspace, route, source):
         failure = "INVALID_ROUTE_AI_POLICY"
     trace["ai_error"] = failure
     return None, {}, trace
+
+
+def resolve_route_media(workspace, info, policy):
+    mode = policy.get("media_policy", "HOLD_MEDIA_FOR_REVIEW")
+    manifest = info.get("media_manifest_json", [])
+    if mode == "STRIP_MEDIA":
+        return [], None
+    if mode == "HOLD_MEDIA_FOR_REVIEW":
+        return [], "MEDIA_REVIEW_REQUIRED" if manifest else None
+    if mode == "ATTACH_WORKSPACE_ASSET":
+        identifiers = [policy.get("media_asset_id")]
+    elif mode == "KEEP_AUTHORIZED_SOURCE_MEDIA":
+        rights = first(
+            "SELECT republish_rights_attested FROM app.sources WHERE workspace_id=%s AND id=%s",
+            (workspace, info["source_id"]),
+        )
+        if manifest and (not rights or not rights["republish_rights_attested"]):
+            return [], "SOURCE_MEDIA_RIGHTS_REQUIRED"
+        identifiers = [
+            item.get("media_asset_id") if isinstance(item, dict) else item for item in manifest
+        ]
+    else:
+        return [], "UNKNOWN_MEDIA_POLICY"
+    if len(identifiers) > 10:
+        return [], "DESTINATION_MEDIA_INCOMPATIBLE"
+    assets = []
+    for identifier in identifiers:
+        try:
+            identifier = UUID(str(identifier))
+        except ValueError:
+            return [], "MEDIA_ASSET_UNAVAILABLE"
+        asset = first("""
+            SELECT id,media_kind,mime_type,byte_size,s3_object_key,origin_kind,
+                license_attribution_json FROM app.media_assets
+            WHERE workspace_id=%s AND id=%s AND NOT is_deleted FOR UPDATE
+        """, (workspace, identifier))
+        if not asset:
+            return [], "MEDIA_ASSET_UNAVAILABLE"
+        if asset["origin_kind"] == "STOCK_LICENSED" and not asset["license_attribution_json"]:
+            return [], "MEDIA_LICENSE_REQUIRED"
+        assets.append(asset)
+    return assets, None

@@ -25,8 +25,9 @@ from relayforge.core.rules import (
 )
 from relayforge.core.scheduling import catch_up, scheduled_for
 from relayforge.web import schemas_m3 as dto
-from relayforge.web.auto_orchestrator import AutoPublishRiskGate, rewrite
+from relayforge.web.auto_orchestrator import AutoPublishRiskGate, resolve_route_media, rewrite
 from relayforge.web.db import audit, first, rows
+from relayforge.web.drafts_m3 import media_incompatible
 from relayforge.web.endpoints import ack, page, require_permission, require_workspace
 from relayforge.web.problems import ProblemError
 from relayforge.web.publications_common import (
@@ -269,7 +270,8 @@ def _daily_limit(route_id, cap, zone, at):
     """, (route_id, start, start + timedelta(days=1)))["total"] >= cap
 
 
-def _compile_target(workspace, ws, route, info, content, destination, override, compiled, now):
+def _compile_target(workspace, ws, route, info, content, destination, override, compiled, now,
+                    *, media=None):
     defaults = ws["settings"].get("route_defaults", {})
     route_policy = (route["transform_rules_json"]
                     if route["route_mode"] in {"RULES", "AI", "HYBRID"} else {})
@@ -289,7 +291,8 @@ def _compile_target(workspace, ws, route, info, content, destination, override, 
     try:
         rendered = inject_brand_identity(transform(content, settings), brand)
         formatting = compile_rich_text(
-            rendered, destination["platform"], album_count=info.get("album_count", 1),
+            rendered, destination["platform"], caption=bool(media),
+            album_count=max(1, len(media)) if media is not None else info.get("album_count", 1),
             album_policy=settings.get("album_fallback_policy", "CANCEL_FOR_INCOMPATIBLE_DEST"),
         )
         # A reserved slot is deterministic under the route row lock used for actual runs.
@@ -307,8 +310,14 @@ def _compile_target(workspace, ws, route, info, content, destination, override, 
     hold = (
         formatting.length_overflow or schedule == "NEEDS_REVIEW"
         or formatting.album_action == "CANCEL_FOR_INCOMPATIBLE_DEST"
-        or info["access_class"] == "REFERENCE_ONLY" or info.get("content_kind", "TEXT") != "TEXT"
+        or info["access_class"] == "REFERENCE_ONLY"
+        or (media is None and info.get("content_kind", "TEXT") != "TEXT")
     )
+    if media and media_incompatible(
+        media, destination["platform"], formatting.album_action, rendered.plain_text
+    ):
+        trace["media_error"] = "DESTINATION_MEDIA_INCOMPATIBLE"
+        hold = True
     if target and _daily_limit(route["id"], route["daily_post_cap"], ws["timezone"], target):
         hold = True
         schedule = "DAILY_CAP_REACHED"
@@ -319,6 +328,9 @@ def _compile_target(workspace, ws, route, info, content, destination, override, 
         "id": destination["id"], "platform": destination["platform"],
         "chat_id": destination["canonical_chat_id"], "scheduled_for": target,
         "payload": formatting.payload, "degradations": formatting.degradations,
+        "media": [{key: asset[key] for key in ("media_kind", "mime_type", "s3_object_key")}
+                  for asset in media] if media else None,
+        "album_action": formatting.album_action,
         "draft_text": rendered.plain_text,
         "draft_spans": [asdict(span) for span in rendered.spans_utf16],
         "catch_up": {"mode": schedule_policy.get("catch_up", "HOLD_FOR_REVIEW"),
@@ -327,12 +339,14 @@ def _compile_target(workspace, ws, route, info, content, destination, override, 
 
 
 class NullDryRunSink:
-    def apply(self, request, workspace, route, item, content, candidate, targets, decision):
+    def apply(self, request, workspace, route, item, content, candidate, targets, decision,
+              media_asset_ids=()):
         return {}
 
 
 class RouteWriteSink:
-    def apply(self, request, workspace, route, item, content, candidate, targets, decision):
+    def apply(self, request, workspace, route, item, content, candidate, targets, decision,
+              media_asset_ids=()):
         if decision not in {"EDITING", "NEEDS_REVIEW", "ENQUEUED"}:
             return {}
         tenant = request.tenant["tenant_id"]
@@ -348,6 +362,7 @@ class RouteWriteSink:
                     cursor, tenant, workspace, identifier, targets, intent="LIVE_PUBLISH",
                     correlation=request.correlation_id, now=datetime.now(UTC),
                     route_id=route["id"], route_revision=revision, source_item=item,
+                    media_asset_ids=media_asset_ids,
                 )
             return {"publication_version_id": identifier, "delivery_task_ids": tasks}
         rows("""
@@ -367,7 +382,7 @@ class RouteWriteSink:
             edited = transform(content, common)
         except (ValueError, TypeError):
             raise ProblemError(422, "INVALID_ROUTE_POLICY") from None
-        save_revision(tenant, identifier, 1, edited, None, brand, [])
+        save_revision(tenant, identifier, 1, edited, None, brand, list(media_asset_ids))
         event(request, workspace, "draft.saved", {"draft_id": str(identifier), "revision_no": 1})
         return {"draft_id": identifier}
 
@@ -419,48 +434,66 @@ def run_pipeline(request, workspace, route, info, sink):
         decision = "ENQUEUED"
     else:
         decision = "SKIP_UNAVAILABLE_OR_EXPIRED"
-    ai_trace = {}
+    ai_trace, media_asset_ids = {}, []
     automated = route["route_mode"] in {"AI", "HYBRID"} and isinstance(sink, RouteWriteSink)
     if (
         automated and decision in {"ENQUEUED", "EDITING", "NEEDS_REVIEW"}
         and route["is_enabled"] and not ws["emergency_stop"]
-        and info["access_class"] == "PROCESSABLE" and not info.get("media_manifest_json")
+        and info["access_class"] == "PROCESSABLE"
         and duplicate != "AMBIGUOUS_NEAR_DUPLICATE_HOLD_REVIEW"
     ):
         text, guard, ai_trace = rewrite(request, workspace, route, content.plain_text)
         policy = route["transform_rules_json"]
         risk = AutoPublishRiskGate.evaluate(
             guard, policy.get("freedom_mode", "BALANCED"), policy,
-            has_media=bool(info.get("media_manifest_json")),
+            has_media=False,
         )
         ai_trace["risk_gate"] = risk
         if risk:
             decision = "NEEDS_REVIEW"
         if text is not None and not risk:
             content = CanonicalRichText(text)
-            trace, targets = [], []
-            for destination in destinations:
-                step, target, needs_review = _compile_target(
-                    workspace, ws, route, info, content, destination,
-                    overrides[str(destination["id"])], compiled, now,
-                )
-                trace.append(step)
-                if target:
-                    targets.append(target)
-                if needs_review:
-                    decision = "NEEDS_REVIEW"
-            if not targets:
+            media, media_error = resolve_route_media(workspace, info, policy)
+            for _ in range(2):
+                trace, targets, needs_review = [], [], False
+                for destination in destinations:
+                    step, target, review = _compile_target(
+                        workspace, ws, route, info, content, destination,
+                        overrides[str(destination["id"])], compiled, now, media=media,
+                    )
+                    trace.append(step)
+                    if target:
+                        targets.append(target)
+                    needs_review |= review
+                    media_error = media_error or step.get("media_error")
+                if media_error and route["fallback_policy"] == "SEND_WITHOUT_MEDIA":
+                    media, media_error = [], None
+                    ai_trace["media_fallback_applied"] = "SEND_WITHOUT_MEDIA"
+                    continue
+                break
+            media_asset_ids = [str(asset["id"]) for asset in media]
+            if media_error:
+                ai_trace["risk_gate"] = media_error
+            if media_error or needs_review or not targets:
                 decision = "NEEDS_REVIEW"
+            else:
+                decision = {
+                    "AUTO_PUBLISH_BY_POLICY": "ENQUEUED", "DRAFT_ONLY": "EDITING",
+                    "APPROVAL_REQUIRED": "NEEDS_REVIEW",
+                }[route["automation_level"]]
         elif text is None:
             rights = first("SELECT republish_rights_attested FROM app.sources WHERE id=%s",
                            (info["source_id"],))
             if route["fallback_policy"] == "STOP":
                 decision = "AI_FAILED_STOP"
             elif not (route["fallback_policy"] == "SEND_AUTHORIZED_ORIGINAL"
-                      and rights and rights["republish_rights_attested"] and not risk):
+                      and rights and rights["republish_rights_attested"]
+                      and not risk
+                      and not info.get("media_manifest_json")):
                 decision = "NEEDS_REVIEW"
     result = sink.apply(
         request, workspace, route, info["id"], content, candidate, targets, decision,
+        media_asset_ids,
     )
     if automated:
         result_ids = {
