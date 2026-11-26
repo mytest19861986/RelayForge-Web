@@ -139,8 +139,17 @@ class TenantRLSMiddleware:
         if not token or len(token) > 128:
             return problem(request, 401)
         try:
+            token_hash = sha256(token)
             with transaction.atomic(using="default"):
-                return self._authenticated(request, sha256(token))
+                session = first("SELECT * FROM app.fn_auth_resolve_session(%s)", (token_hash,))
+                if not session:
+                    return problem(request, 401)
+                set_context(session["tenant_id"], session["user_id"])
+                limited = session_rate_limit(session["session_id"], session["tenant_id"])
+            if limited:
+                return problem(request, 429, retry_after=WINDOW)
+            with transaction.atomic(using="default"):
+                return self._authenticated(request, token_hash)
         except DatabaseError:
             return problem(request, 503)
 
@@ -160,9 +169,6 @@ class TenantRLSMiddleware:
             return problem(request, 401)
         request.tenant = session
         set_context(session["tenant_id"], session["user_id"])
-
-        if session_rate_limit(session["session_id"], session["tenant_id"]):
-            return problem(request, 429, retry_after=WINDOW)
 
         if request.method in MUTATING:
             csrf = request.headers.get("X-CSRFToken", "")
