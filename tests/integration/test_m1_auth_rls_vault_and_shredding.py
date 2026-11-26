@@ -45,11 +45,11 @@ def provision(slug):
     return expect(response, 201)["id"]
 
 
-def login(slug):
+def login(slug, **headers):
     client = Client()
     response = request(client, "POST", "/auth/login", {
         "email": f"{slug.upper()}@example.COM", "password": PASSWORD,
-    })
+    }, **headers)
     session = expect(response, 200)
     cookie = response.cookies[COOKIE]
     assert cookie["secure"] and cookie["httponly"]

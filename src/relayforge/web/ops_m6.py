@@ -12,12 +12,21 @@ from pydantic import Field, SecretStr
 
 from relayforge.adapters.disk_pressure import disk_state
 from relayforge.adapters.s3_storage import StorageError, export_key
-from relayforge.adapters.tenant_backup import decode, encode, open_bundle, packed, seal, sha
+from relayforge.adapters.tenant_backup import (
+    MAX_BYTES,
+    decode,
+    encode,
+    open_bundle,
+    packed,
+    seal,
+    sha,
+)
 from relayforge.core.security import SecretKind, mask_secret_preview, scrub_sensitive_text
 from relayforge.web.ai_m4 import budgets
 from relayforge.web.db import audit, first, rows
 from relayforge.web.delivery_m3 import emergency_stop
 from relayforge.web.endpoints import require_permission, require_workspace
+from relayforge.web.logical_m7 import apply_logical, inspect_entries, logical_export
 from relayforge.web.problems import ProblemError
 from relayforge.web.routes_m2 import credentials, get_idempotency_token, storage
 from relayforge.web.schemas_m3 import StopInput
@@ -31,11 +40,16 @@ SECRETS = "secrets/tenant_vault_rekeyed.aead"
 class BackupInput(Schema):
     backup_password: SecretStr = Field(min_length=12, max_length=256)
     includes_reencrypted_secrets: bool = False
+    backup_scope: Literal["TENANT_SETTINGS_EXPORT", "TENANT_FULL_LOGICAL"] = (
+        "TENANT_SETTINGS_EXPORT"
+    )
+    include_media_assets: bool = False
 
 
 class RestoreInput(BackupInput):
     mode: Literal["PREVIEW", "APPLY"]
-    bundle_base64: str = Field(max_length=700000)
+    bundle_base64: str | None = Field(default=None, max_length=700000)
+    manifest_id: UUID | None = None
 
 
 def alert(tenant, workspace, key, severity, title, body):
@@ -200,7 +214,7 @@ def report_export(request, wsId: UUID, format: Literal["json", "csv"] = "json"):
     return HttpResponse(scrub_sensitive_text(report), content_type="application/json")
 
 
-def create_backup(request, workspace, data, identifier, *, persist=False):
+def create_backup(request, workspace, data, identifier):
     tenant = request.tenant["tenant_id"]
     config = first(
         """
@@ -235,6 +249,7 @@ def create_backup(request, workspace, data, identifier, *, persist=False):
         entries[SECRETS] = packed(
             [
                 {
+                    "id": str(item["id"]),
                     "secret_kind": item["secret_kind"],
                     "label": item["label"],
                     "value": credentials(workspace, item["id"], item["secret_kind"]),
@@ -243,11 +258,23 @@ def create_backup(request, workspace, data, identifier, *, persist=False):
             ]
         )
     try:
+        if data.backup_scope == "TENANT_FULL_LOGICAL":
+            entries.update(logical_export(workspace, tenant, data.include_media_assets))
         manifest, bundle = seal(
-            data.backup_password.get_secret_value(), tenant, config["slug"], entries
+            data.backup_password.get_secret_value(),
+            tenant,
+            config["slug"],
+            entries,
+            scope=data.backup_scope,
         )
     except ValueError:
         raise ProblemError(422, "BACKUP_TOO_LARGE") from None
+    inline = len(bundle) <= 512 * 1024
+    if not inline:
+        try:
+            storage().put_object(f"tenants/{tenant}/backups/{identifier}.rfbak", bundle)
+        except StorageError:
+            raise ProblemError(503, "BACKUP_STORAGE_UNAVAILABLE") from None
     rows(
         """
         INSERT INTO app.backup_manifests (id,tenant_id,backup_scope,cipher_alg,
@@ -260,10 +287,14 @@ def create_backup(request, workspace, data, identifier, *, persist=False):
             manifest["backup_scope"],
             sha(bundle),
             len(bundle),
-            bundle if persist else None,
+            bundle if inline else None,
         ),
     )
-    return {"manifest_id": identifier, "manifest": manifest, "bundle_base64": encode(bundle)}
+    return {
+        "manifest_id": identifier,
+        "manifest": manifest,
+        "bundle_base64": encode(bundle) if inline else None,
+    }
 
 
 @router.post(ROOT + "/backups")
@@ -273,14 +304,51 @@ def backup(request, wsId: UUID, data: BackupInput):
     return create_backup(request, wsId, data, uuid4())
 
 
+def stored_bundle(tenant, identifier):
+    manifest = first(
+        """
+        SELECT inline_archive,archive_checksum_sha256,byte_size FROM app.backup_manifests
+        WHERE id=%s AND tenant_id=%s AND status IN ('COMPLETED','VERIFIED')
+    """,
+        (identifier, tenant),
+    )
+    if not manifest or manifest["byte_size"] > MAX_BYTES:
+        raise ValueError("INVALID_BACKUP")
+    if manifest["inline_archive"] is not None:
+        bundle = bytes(manifest["inline_archive"])
+    else:
+        key = f"tenants/{tenant}/backups/{identifier}.rfbak"
+        content = bytearray()
+        for chunk in storage().stream_object_chunks(key):
+            content.extend(chunk)
+            if len(content) > MAX_BYTES:
+                raise ValueError("INVALID_BACKUP")
+        bundle = bytes(content)
+    if sha(bundle) != manifest["archive_checksum_sha256"]:
+        raise ValueError("INVALID_BACKUP")
+    return bundle
+
+
 @router.post(ROOT + "/backups/restore")
 def restore(request, wsId: UUID, data: RestoreInput):
     require_permission(request, "manage_security")
     require_workspace(wsId)
+    tenant = request.tenant["tenant_id"]
     try:
-        bundle = decode(data.bundle_base64)
+        if (data.bundle_base64 is None) == (data.manifest_id is None):
+            raise ValueError
+        bundle = (
+            decode(data.bundle_base64)
+            if data.bundle_base64 is not None
+            else stored_bundle(tenant, data.manifest_id)
+        )
         manifest, entries = open_bundle(data.backup_password.get_secret_value(), bundle)
-        if CONFIG not in entries or set(entries) - {CONFIG, SECRETS}:
+        records, media = {}, {}
+        if manifest["backup_scope"] == "TENANT_FULL_LOGICAL":
+            records, media = inspect_entries(
+                {key: value for key, value in entries.items() if key not in {CONFIG, SECRETS}}
+            )
+        elif set(entries) - {CONFIG, SECRETS}:
             raise ValueError
         config = json.loads(entries[CONFIG])
         secrets = json.loads(entries.get(SECRETS, b"[]"))
@@ -288,7 +356,8 @@ def restore(request, wsId: UUID, data: RestoreInput):
             raise ValueError
         if len(secrets) > 128 or any(
             not isinstance(item, dict)
-            or set(item) != {"label", "secret_kind", "value"}
+            or set(item)
+            not in ({"label", "secret_kind", "value"}, {"id", "label", "secret_kind", "value"})
             or item["secret_kind"] not in SecretKind
             or not isinstance(item["label"], str)
             or not 1 <= len(item["label"]) <= 120
@@ -301,6 +370,8 @@ def restore(request, wsId: UUID, data: RestoreInput):
         raise ProblemError(422, "INVALID_BACKUP") from None
     impact = {
         "workspace_settings": 1,
+        "table_counts": {name: len(values) for name, values in records.items()},
+        "media_count": len(media),
         "secret_rekey_count": len(secrets),
         "safe_mode_enforced": True,
         "pitr_retention_disclosure_days": 14,
@@ -313,10 +384,14 @@ def restore(request, wsId: UUID, data: RestoreInput):
         SELECT key_version,wrapped_dek_ciphertext FROM app.tenant_encryption_keys
         WHERE key_state='ACTIVE' ORDER BY key_version DESC LIMIT 1
     """)
-    for item in secrets:
+    secret_map = {}
+    for index, item in enumerate(secrets):
         if not key:
             raise ProblemError(409, "BACKUP_DESTINATION_KEY_REQUIRED")
-        identifier = uuid4()
+        sid = item.get("id", str(index))
+        identifier = uuid5(wsId, f"{sha(bundle)}:{sid}")
+        if "id" in item:
+            secret_map[str(UUID(sid))] = str(identifier)
         value = item["value"]
         nonce, encrypted = settings.VAULT.encrypt_secret(
             tenant,
@@ -332,7 +407,7 @@ def restore(request, wsId: UUID, data: RestoreInput):
             INSERT INTO app.secrets_vault
               (id,tenant_id,workspace_id,secret_kind,label,masked_hint,dek_version,
                ciphertext_aead,nonce_bytes)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING
         """,
             (
                 identifier,
@@ -346,6 +421,11 @@ def restore(request, wsId: UUID, data: RestoreInput):
                 nonce,
             ),
         )
+    try:
+        if records:
+            apply_logical(wsId, tenant, records, media, secret_map)
+    except (ValueError, StorageError):
+        raise ProblemError(422, "LOGICAL_RESTORE_INCOMPATIBLE") from None
     disable_workspace(request, wsId)
     rows(
         """
@@ -386,11 +466,14 @@ def reset(request, wsId: UUID, data: BackupInput):
     prior = first("SELECT inline_archive FROM app.backup_manifests WHERE id=%s", (identifier,))
     if prior:
         try:
-            bundle = bytes(prior["inline_archive"])
+            bundle = stored_bundle(request.tenant["tenant_id"], identifier)
             manifest, _ = open_bundle(data.backup_password.get_secret_value(), bundle)
         except (TypeError, ValueError):
             raise ProblemError(409, "IDEMPOTENCY_KEY_REUSED") from None
-        if manifest["includes_reencrypted_secrets"] != data.includes_reencrypted_secrets:
+        if (
+            manifest["includes_reencrypted_secrets"] != data.includes_reencrypted_secrets
+            or manifest["backup_scope"] != data.backup_scope
+        ):
             raise ProblemError(409, "IDEMPOTENCY_KEY_REUSED")
         return {
             "manifest_id": identifier,
@@ -399,7 +482,7 @@ def reset(request, wsId: UUID, data: BackupInput):
             "remote_deletion_performed": False,
             "replayed": True,
         }
-    result = create_backup(request, wsId, data, identifier, persist=True)
+    result = create_backup(request, wsId, data, identifier)
     disable_workspace(request, wsId)
     audit(request, "OPS_SAFE_RESET", "WORKSPACE", wsId, workspace=wsId)
     return result | {"remote_deletion_performed": False}

@@ -13,7 +13,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 MAGIC = b"RFBAK2\0"
-MAX_BYTES = 512 * 1024
+MAX_BYTES = 48 * 1024 * 1024
 ENTRY_PATH = re.compile(
     r"(logical/tables/[a-z0-9_]+\.jsonl|secrets/tenant_vault_rekeyed\.aead|"
     r"media/[a-f0-9]{2}/[a-f0-9]{64}\.[a-z0-9]{1,8}|config/[a-z0-9_.-]+\.json)"
@@ -44,7 +44,7 @@ def valid_path(path):
     return isinstance(path, str) and ".." not in path and ENTRY_PATH.fullmatch(path)
 
 
-def seal(password, tenant, slug, entries):
+def seal(password, tenant, slug, entries, *, scope="TENANT_SETTINGS_EXPORT"):
     salt = os.urandom(16)
     key = cipher(password, salt)
     manifest = {
@@ -54,7 +54,7 @@ def seal(password, tenant, slug, entries):
         "app_schema_version": "0007",
         "tenant_id": str(tenant),
         "source_workspace_slug": slug,
-        "backup_scope": "TENANT_SETTINGS_EXPORT",
+        "backup_scope": scope,
         "kdf_params": {
             "algorithm": "ARGON2ID",
             "memory_kib": 65536,
@@ -108,7 +108,7 @@ def open_bundle(password, bundle):
         outer_nonce = bundle[header_size : header_size + 12]
         manifest, payload = json.loads(key.decrypt(outer_nonce, bundle[header_size + 12 :], header))
         entries = manifest["entries"]
-        if not 1 <= len(entries) <= 128 or len(entries) != len(payload):
+        if not 1 <= len(entries) <= 1024 or len(entries) != len(payload):
             raise ValueError
         result = {}
         nonces = {outer_nonce}
@@ -138,6 +138,9 @@ def open_bundle(password, bundle):
 
 
 def validate_manifest(manifest, salt, result):
+    scope = manifest["backup_scope"]
+    if scope not in {"TENANT_SETTINGS_EXPORT", "TENANT_FULL_LOGICAL"}:
+        raise ValueError
     created = datetime.fromisoformat(manifest["created_at"])
     slug = manifest["source_workspace_slug"]
     if created.utcoffset() is None or len(slug) > 64 or not isinstance(slug, str):
@@ -150,7 +153,7 @@ def validate_manifest(manifest, salt, result):
         "app_schema_version": "0007",
         "tenant_id": manifest["tenant_id"],
         "source_workspace_slug": slug,
-        "backup_scope": "TENANT_SETTINGS_EXPORT",
+        "backup_scope": scope,
         "kdf_params": {
             "algorithm": "ARGON2ID",
             "memory_kib": 65536,

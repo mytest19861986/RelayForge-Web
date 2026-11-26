@@ -1,0 +1,6 @@
+{$RF_PUBLIC_HOST} {
+    tls {
+        protocols tls1.2 tls1.3
+    }
+    reverse_proxy web-api:8000
+}
