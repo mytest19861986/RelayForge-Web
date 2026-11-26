@@ -1,4 +1,4 @@
-"""Apply the immutable M0 database contract from a repository checkout."""
+"""Apply the ordered PostgreSQL contracts from a repository checkout."""
 
 import argparse
 import hashlib
@@ -15,43 +15,53 @@ class MigrationChecksumMismatchError(RuntimeError):
     """The migration ledger and expected baseline checksum disagree."""
 
 
-def apply_baseline_schema(dsn: str, *, expected_checksum: str | None = None) -> str:
-    source = (CONTRACTS_DIR / "database_schema.sql").read_text(encoding="utf-8")
-    checksum = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    expected = checksum if expected_checksum is None else expected_checksum
-    if checksum != expected:
-        raise MigrationChecksumMismatchError("Expected checksum does not match the SQL contract")
+M1_VERSION = "0002_m1_auth_and_shredding_functions"
+MIGRATIONS = (
+    (VERSION, CONTRACTS_DIR / "database_schema.sql"),
+    (M1_VERSION, CONTRACTS_DIR.parents[1] / "migrations" / f"{M1_VERSION}.sql"),
+)
 
+
+def apply_baseline_schema(dsn: str, *, expected_checksum: str | None = None) -> str:
+    applied = False
     with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn, conn.transaction():
         if conn.info.server_version // 10000 != 16:
             raise RuntimeError("PostgreSQL 16 is required")
 
-        # Serialize competing bootstraps for this database until the ledger is committed.
         conn.execute("SELECT pg_catalog.pg_advisory_xact_lock(1380338992)")
         ledger_exists = conn.execute(
             "SELECT pg_catalog.to_regclass('app.schema_migrations') IS NOT NULL"
         ).fetchone()[0]
-
-        if not ledger_exists:
-            conn.execute(source, prepare=False)
-
-        conn.execute("SET LOCAL ROLE relayforge_migrator")
         conn.execute("SET LOCAL app.migration_mode = 'on'")
-        if ledger_exists:
-            row = conn.execute(
-                "SELECT checksum_sha256 FROM app.schema_migrations WHERE version = %s", (VERSION,)
-            ).fetchone()
-            if row is None or row[0] != expected:
-                raise MigrationChecksumMismatchError(
-                    f"Missing or different ledger entry: {VERSION}"
-                )
-            return "ALREADY_APPLIED"
+        for version, path in MIGRATIONS:
+            source = path.read_text(encoding="utf-8")
+            checksum = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            if version == VERSION and expected_checksum not in {None, checksum}:
+                raise MigrationChecksumMismatchError("Expected checksum differs from baseline SQL")
 
-        conn.execute(
-            "INSERT INTO app.schema_migrations (version, checksum_sha256) VALUES (%s, %s)",
-            (VERSION, checksum),
-        )
-        return "APPLIED"
+            if ledger_exists:
+                conn.execute("SET LOCAL ROLE relayforge_migrator")
+                row = conn.execute(
+                    "SELECT checksum_sha256 FROM app.schema_migrations WHERE version = %s",
+                    (version,),
+                ).fetchone()
+                conn.execute("RESET ROLE")
+                if row:
+                    if row[0] != checksum:
+                        raise MigrationChecksumMismatchError(f"Different ledger entry: {version}")
+                    continue
+                if version == VERSION:
+                    raise MigrationChecksumMismatchError(f"Missing ledger entry: {version}")
+
+            conn.execute(source, prepare=False)
+            conn.execute("SET LOCAL ROLE relayforge_migrator")
+            conn.execute(
+                "INSERT INTO app.schema_migrations (version, checksum_sha256) VALUES (%s, %s)",
+                (version, checksum),
+            )
+            conn.execute("RESET ROLE")
+            applied = ledger_exists = True
+    return "APPLIED" if applied else "ALREADY_APPLIED"
 
 
 def main() -> None:
