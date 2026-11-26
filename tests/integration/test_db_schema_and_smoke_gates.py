@@ -26,6 +26,7 @@ ROLES = {
     "relayforge_worker",
     "relayforge_dispatcher_owner",
     "relayforge_ledger_owner",
+    "relayforge_auth_owner",
 }
 PASS_NOTICE = "ALL G0 v1.3.2 NON-VACUOUS BEHAVIORAL & SECURITY ASSERTIONS PASSED!"
 MUTANTS = [
