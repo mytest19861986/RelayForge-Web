@@ -1,0 +1,37 @@
+# Python & Virtual Environments
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Linters, Test & Type Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.import_linter_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Frontend & Node
+node_modules/
+
+# Local Environment, Secrets & Ephemeral Artifacts
+.env
+.env.*
+!.env.example
+tmp/
+staging/
+artifacts/
+*.zip
+*.tar
+*.tar.gz
+*.rfbak
+
+# Disposable G0 Spike Lab Evidence (kept local only)
+g0-spike/

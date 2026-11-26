@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://app.relayforge.ir/schemas/backup_manifest.schema.json",
+  "title": "RelayForge Web SaaS Tenant Logical Export & Cluster PITR Manifest v2.0 (BAK-01..BAK-08, OC-03)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "manifest_version",
+    "created_at",
+    "app_schema_version",
+    "tenant_id",
+    "source_workspace_slug",
+    "backup_scope",
+    "kdf_params",
+    "cipher_suite",
+    "safe_mode_enforced_on_restore",
+    "pitr_retention_disclosure_days",
+    "limits",
+    "entries"
+  ],
+  "properties": {
+    "format": { "const": "RELAYFORGE_SAAS_ENCRYPTED_BACKUP" },
+    "manifest_version": { "const": "2.0" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "app_schema_version": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "source_workspace_slug": { "type": "string", "maxLength": 64 },
+    "backup_scope": {
+      "enum": ["TENANT_SETTINGS_EXPORT", "TENANT_FULL_LOGICAL", "CLUSTER_PITR_MARKER"]
+    },
+    "includes_reencrypted_secrets": { "type": "boolean" },
+    "kdf_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "memory_kib", "iterations", "parallelism", "salt_b64"],
+      "properties": {
+        "algorithm": { "const": "ARGON2ID" },
+        "memory_kib": { "type": "integer", "minimum": 65536 },
+        "iterations": { "type": "integer", "minimum": 3 },
+        "parallelism": { "type": "integer", "minimum": 1 },
+        "salt_b64": { "type": "string", "minLength": 20 }
+      }
+    },
+    "cipher_suite": {
+      "enum": ["AES-256-GCM", "CHACHA20-POLY1305-AGE", "PGBACKREST-AES-256-CBC-HMAC-SHA256"],
+      "description": "Unauthenticated raw CBC without MAC/AEAD is strictly forbidden (OC-03)."
+    },
+    "safe_mode_enforced_on_restore": { "const": true },
+    "pitr_retention_disclosure_days": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 90,
+      "description": "Discloses physical WAL/PITR retention window before plaintext payload_json ages out after tenant Crypto-Shredding."
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_uncompressed_bytes", "entry_count", "max_compression_ratio"],
+      "properties": {
+        "total_uncompressed_bytes": { "type": "integer", "minimum": 0, "maximum": 10737418240 },
+        "entry_count": { "type": "integer", "minimum": 1, "maximum": 500000 },
+        "max_compression_ratio": { "type": "integer", "minimum": 1, "maximum": 50 }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["logical_path", "byte_size", "plaintext_sha256", "ciphertext_sha256", "aead_nonce_b64"],
+        "properties": {
+          "logical_path": {
+            "type": "string",
+            "pattern": "^(logical/tables/[a-z0-9_]+\\.jsonl|secrets/tenant_vault_rekeyed\\.aead|media/[a-f0-9]{2}/[a-f0-9]{64}\\.[a-z0-9]{1,8}|config/[a-z0-9_.-]+\\.json)$",
+            "description": "Strict relative regex preventing Zip-Slip / Path Traversal across tenant logical exports."
+          },
+          "byte_size": { "type": "integer", "minimum": 0 },
+          "plaintext_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "ciphertext_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "aead_nonce_b64": { "type": "string", "minLength": 16 }
+        }
+      }
+    }
+  }
+}

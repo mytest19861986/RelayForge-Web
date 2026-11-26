@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://app.relayforge.ir/schemas/style_package.schema.json",
+  "title": "RelayForge Portable Style Profile Package v2.0 (STY-04 / STY-05 / FMT-06)",
+  "description": "Strict secret-free, code-free JSON interchange format for Style Profiles across Web SaaS tenants with single-{body} token enforcement.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "package_format",
+    "schema_version",
+    "exported_at",
+    "style_profile",
+    "revision",
+    "integrity_sha256"
+  ],
+  "properties": {
+    "package_format": { "const": "RELAYFORGE_STYLE_PACKAGE" },
+    "schema_version": { "const": "2.0" },
+    "exported_at": { "type": "string", "format": "date-time" },
+    "style_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "title", "category", "origin_kind", "tags"],
+      "properties": {
+        "slug": { "type": "string", "pattern": "^[a-z0-9_-]{2,64}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "category": { "type": "string", "maxLength": 64 },
+        "origin_kind": { "enum": ["EXTRACTED", "MANUAL", "IMPORTED", "BLENDED", "COMPOSED"] },
+        "tags": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "type": "string", "maxLength": 40 }
+        }
+      }
+    },
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision_no", "writing_rules", "layout_template", "statistical_evidence", "visual_style"],
+      "properties": {
+        "revision_no": { "type": "integer", "minimum": 1 },
+        "writing_rules": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tone", "formality", "avg_sentence_words", "emoji_density", "hashtag_count_range", "opening_pattern", "closing_cta_pattern", "instructions_fa"],
+          "properties": {
+            "tone": { "type": "string", "maxLength": 80 },
+            "formality": { "enum": ["FORMAL", "SEMI_FORMAL", "CONVERSATIONAL", "NEWS_WIRE"] },
+            "avg_sentence_words": { "type": "number", "minimum": 1, "maximum": 200 },
+            "emoji_density": { "enum": ["NONE", "LOW", "MODERATE", "HIGH"] },
+            "hashtag_count_range": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": { "type": "integer", "minimum": 0, "maximum": 30 }
+            },
+            "opening_pattern": { "type": "string", "maxLength": 300 },
+            "closing_cta_pattern": { "type": "string", "maxLength": 300 },
+            "instructions_fa": { "type": "string", "maxLength": 4000 }
+          }
+        },
+        "layout_template": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["template_tokens", "bold_first_line"],
+          "properties": {
+            "template_tokens": {
+              "type": "string",
+              "maxLength": 1000,
+              "pattern": "^(?:[^{}]|\\{(?:title|brand|destination|hashtags|source_credit)\\})*\\{body\\}(?:[^{}]|\\{(?:title|brand|destination|hashtags|source_credit)\\})*$",
+              "description": "Enforces FMT-06: {body} appears ONCE AND ONLY ONCE, and only the 6 whitelisted placeholders are permitted."
+            },
+            "bold_first_line": { "type": "boolean" }
+          }
+        },
+        "statistical_evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["unique_sample_count", "evidence_sufficiency"],
+          "properties": {
+            "unique_sample_count": { "type": "integer", "minimum": 0 },
+            "evidence_sufficiency": { "enum": ["SUFFICIENT", "LOW_EVIDENCE", "INSUFFICIENT"] },
+            "median_char_length": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "visual_style": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dominant_palette_hex": {
+              "type": "array",
+              "maxItems": 8,
+              "items": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" }
+            },
+            "preferred_aspect_ratio": { "enum": ["1:1", "4:3", "3:4", "16:9", "9:16", "AUTO"] },
+            "visual_mood": { "type": "string", "maxLength": 200 }
+          }
+        },
+        "composition_weights": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_slug", "weight"],
+            "properties": {
+              "source_slug": { "type": "string" },
+              "weight": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "integrity_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

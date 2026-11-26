@@ -1,0 +1,1215 @@
+openapi: 3.1.0
+info:
+  title: RelayForge Multi-Tenant Web SaaS Studio & Control API
+  version: 2.0.0
+  summary: Complete HTTPS REST contract for RelayForge Web SaaS (Django 5.2 LTS + Django Ninja + PostgreSQL 16 FORCE RLS)
+  description: >
+    Served behind Caddy/Nginx TLS 1.2 + 1.3 on Ubuntu 24.04 LTS.
+    Authenticated via revocable server-side `__Host-rf_session` HttpOnly/Secure cookie
+    plus `X-CSRFToken` header on all state-mutating requests.
+    Every authenticated request runs inside a Django `transaction.atomic()` block with
+    `SET LOCAL app.tenant_id = '<tenant_uuid>'` over PgBouncer (`pool_mode = transaction`).
+    Customer MTProto sessions on the server are BLOCKED; historical Telegram ingestion uses
+    S3 Presigned POST (`SeaweedFS Apache-2.0`) + streaming `ijson (yajl2_c)` extraction.
+    SSE is replaced in MVP by stateless short-interval polling (`/workspaces/{wsId}/events/poll`).
+servers:
+  - url: https://app.relayforge.ir/api/v1
+    description: Production / Closed Pilot HTTPS Endpoint (TLS 1.2 + 1.3)
+  - url: http://127.0.0.1:8000/api/v1
+    description: Local Developer Compose Endpoint
+
+security:
+  - SessionCookieAuth: []
+    CsrfTokenHeader: []
+
+components:
+  securitySchemes:
+    SessionCookieAuth:
+      type: apiKey
+      in: cookie
+      name: __Host-rf_session
+    CsrfTokenHeader:
+      type: apiKey
+      in: header
+      name: X-CSRFToken
+    OperatorBearerAuth:
+      type: http
+      scheme: bearer
+      description: Dedicated Platform Operator Plane credential mapping exclusively to `relayforge_operator` role (OC-01).
+
+  parameters:
+    WorkspaceId:
+      name: wsId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CursorParam:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+  schemas:
+    ProblemDetails:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, category, message_fa, retryable, correlation_id]
+          properties:
+            code:
+              type: string
+              description: Domain or SQLSTATE code (e.g., RF001..RF021)
+            category:
+              type: string
+              enum: [VALIDATION, AUTH_PERMISSION, QUOTA_RATE_LIMIT, TRANSIENT, INCOMPATIBLE_CONTENT, UNCERTAIN, CONFLICT, INTERNAL]
+            message_fa: { type: string }
+            suggested_action_fa: { type: [string, 'null'] }
+            retryable: { type: boolean }
+            retry_after_sec: { type: [integer, 'null'] }
+            correlation_id: { type: string }
+
+    AckResponse:
+      type: object
+      required: [ok, correlation_id]
+      properties:
+        ok: { type: boolean }
+        id: { type: [string, 'null'] }
+        status: { type: [string, 'null'] }
+        correlation_id: { type: string }
+
+    PaginatedList:
+      type: object
+      required: [items, page_info]
+      properties:
+        items:
+          type: array
+          items: { type: object }
+        page_info:
+          type: object
+          required: [limit, has_more]
+          properties:
+            limit: { type: integer }
+            next_cursor: { type: [string, 'null'] }
+            has_more: { type: boolean }
+
+    FormatSpanUtf16:
+      type: object
+      required: [offset, length, kind]
+      properties:
+        offset: { type: integer, minimum: 0 }
+        length: { type: integer, minimum: 1 }
+        kind:
+          type: string
+          enum: [BOLD, ITALIC, UNDERLINE, STRIKE, CODE, PRE, QUOTE, SPOILER, LINK, MENTION, HASHTAG]
+        url: { type: [string, 'null'], format: uri }
+
+    CanonicalRichText:
+      type: object
+      required: [plain_text, spans_utf16]
+      properties:
+        plain_text: { type: string, maxLength: 32768 }
+        spans_utf16:
+          type: array
+          items: { $ref: '#/components/schemas/FormatSpanUtf16' }
+
+    FreedomMode:
+      type: string
+      enum: [STRICT, BALANCED, CREATIVE, UNRESTRICTED]
+
+    WorkflowMode:
+      type: string
+      enum: [COPY, RULES, AI, HYBRID]
+
+    MessengerPlatform:
+      type: string
+      enum: [TELEGRAM, BALE, EITAA, RUBIKA_EXPERIMENTAL, SOROUSH_EXPERIMENTAL]
+
+    PresignExportResponse:
+      type: object
+      required: [export_job_id, upload_url, form_fields, max_bytes, expires_in_sec]
+      properties:
+        export_job_id: { type: string, format: uuid }
+        upload_url: { type: string, format: uri }
+        form_fields:
+          type: object
+          required: [bucket, key]
+          additionalProperties: { type: string }
+          description: Includes explicit `bucket` field required by strict S3v4 POST parsers and `tenants/{tenant_id}/exports/` prefix policy.
+        max_bytes: { type: integer, const: 272629760 }
+        expires_in_sec: { type: integer }
+
+    GenerateStudioRequest:
+      type: object
+      required: [input_mode, task_type, freedom_mode, routing_mode]
+      properties:
+        input_mode:
+          type: string
+          enum: [MANUAL_TEXT, SOURCE_ITEM, TOPIC_PROMPT]
+        raw_text: { type: [string, 'null'], maxLength: 32768 }
+        source_content_item_id: { type: [string, 'null'], format: uuid }
+        task_type:
+          type: string
+          enum: [REWRITE, SUMMARIZE, EXPAND, TRANSLATE, COPYEDIT, NEW_FROM_IDEA, PODCAST_SCRIPT]
+        style_profile_id: { type: [string, 'null'], format: uuid }
+        brand_identity_id: { type: [string, 'null'], format: uuid }
+        freedom_mode: { $ref: '#/components/schemas/FreedomMode' }
+        option_count: { type: integer, minimum: 1, maximum: 4, default: 1 }
+        routing_mode:
+          type: string
+          enum: [MANUAL, AUTO_ECONOMY, AUTO_QUALITY]
+        manual_provider_id: { type: [string, 'null'], format: uuid }
+        manual_model_id: { type: [string, 'null'] }
+        target_destination_ids:
+          type: array
+          items: { type: string, format: uuid }
+
+    PublishDraftRequest:
+      type: object
+      required: [expected_draft_revision_no, mode, destination_ids, explicit_user_confirmation]
+      properties:
+        expected_draft_revision_no: { type: integer, minimum: 1 }
+        mode:
+          type: string
+          enum: [EXPLICIT_TEST_SEND, LIVE_PUBLISH, EVERGREEN_REPUBLISH]
+        destination_ids:
+          type: array
+          minItems: 1
+          items: { type: string, format: uuid }
+        album_fallback_policy:
+          type: string
+          enum: [SEQUENTIAL_POSTS, CANCEL_FOR_INCOMPATIBLE_DEST]
+          default: SEQUENTIAL_POSTS
+        schedule:
+          type: object
+          required: [kind]
+          properties:
+            kind: { type: string, enum: [IMMEDIATE, AT_TIMESTAMP] }
+            scheduled_for: { type: [string, 'null'], format: date-time }
+        explicit_user_confirmation: { type: boolean, const: true }
+
+    ReconcileUncertainRequest:
+      oneOf:
+        - type: object
+          required: [expected_lease_epoch, resolution_action, reason]
+          properties:
+            expected_lease_epoch: { type: integer, minimum: 1 }
+            resolution_action:
+              type: string
+              enum: [CONFIRM_SENT, DISCARD_DO_NOT_SEND]
+            reason: { type: string, minLength: 3, maxLength: 1000 }
+            acknowledge_duplicate_risk: { type: boolean }
+        - type: object
+          required: [expected_lease_epoch, resolution_action, reason, acknowledge_duplicate_risk]
+          properties:
+            expected_lease_epoch: { type: integer, minimum: 1 }
+            resolution_action:
+              type: string
+              const: CONFIRM_NOT_SENT_REQUEUE
+            reason: { type: string, minLength: 3, maxLength: 1000 }
+            acknowledge_duplicate_risk:
+              type: boolean
+              const: true
+              description: Mandatory explicit duplicate-send risk acceptance before requeuing an UNCERTAIN task (QUE-08).
+
+paths:
+  /health:
+    get:
+      summary: Liveness & readiness check for PgBouncer, PostgreSQL, S3 gateway, spool space, and media-worker socket (APP-06)
+      security: []
+      responses:
+        '200':
+          description: Subsystem health summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /auth/login:
+    post:
+      summary: Authenticate user via Argon2id, select default/active tenant, issue `__Host-rf_session` cookie & CSRF token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 12, maxLength: 256 }
+                tenant_slug: { type: [string, 'null'] }
+      responses:
+        '200':
+          description: Authenticated session established
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant_id, default_workspace_id, role, csrf_token]
+                properties:
+                  tenant_id: { type: string, format: uuid }
+                  default_workspace_id: { type: string, format: uuid }
+                  role: { type: string, enum: [OWNER, ADMIN, EDITOR, PUBLISHER, VIEWER] }
+                  csrf_token: { type: string }
+        '401':
+          description: Invalid credentials or suspended tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+
+  /auth/logout:
+    post:
+      summary: Immediately revoke server-side `web_sessions` row and clear `__Host-rf_session` cookie (SEC-04)
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /tenants/current:
+    get:
+      summary: Retrieve current tenant metadata, RBAC role, and read-only Operator Plan Quotas (`OPERATOR_PLAN`)
+      security:
+        - SessionCookieAuth: []
+      responses:
+        '200':
+          description: Current tenant context & plan ceiling summary
+          content:
+            application/json:
+              schema: { type: object }
+
+  /tenants/current/delete-account:
+    post:
+      summary: Execute Owner-confirmed Tenant Deletion + DEK Crypto-Shredding with PITR retention window disclosure (SEC-09)
+      responses:
+        '202':
+          description: Live data deletion & DEK shredding initiated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /operator/tenants/{tenantId}/plan-quotas:
+    put:
+      summary: Platform Operator Control-Plane endpoint (`relayforge_operator`) to set immutable `OPERATOR_PLAN` ceilings (OC-01)
+      security:
+        - OperatorBearerAuth: []
+      parameters:
+        - name: tenantId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Operator plan quota updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /webhooks/inbound/{platform}/{webhookToken}:
+    post:
+      summary: Verified inbound Bot API webhook receiver for Telegram & Bale (`X-Telegram-Bot-Api-Secret-Token` verified — SRC-02)
+      security: []
+      parameters:
+        - name: platform
+          in: path
+          required: true
+          schema: { type: string, enum: [telegram, bale] }
+        - name: webhookToken
+          in: path
+          required: true
+          schema: { type: string, minLength: 32, maxLength: 128 }
+      responses:
+        '200':
+          description: Inbound update accepted idempotently
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces:
+    get:
+      summary: List isolated workspaces within current tenant (`FORCE RLS` enforced — APP-04)
+      security:
+        - SessionCookieAuth: []
+      responses:
+        '200':
+          description: Workspaces list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    post:
+      summary: Create a new isolated workspace within current tenant
+      responses:
+        '201':
+          description: Workspace created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/dashboard:
+    get:
+      summary: Operational counters, source/dest health, and dual-tier AI budget summary (OPS-01, OPS-02, OPS-05)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Dashboard snapshot
+          content:
+            application/json:
+              schema: { type: object }
+
+  /workspaces/{wsId}/events/poll:
+    get:
+      summary: Stateless short-interval incremental event & job-progress polling (replaces SSE in MVP for PgBouncer tx-mode safety)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Incremental domain events & active job deltas
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+
+  /workspaces/{wsId}/security/consents:
+    get:
+      summary: List granular external data consents per provider & modality (AIP-11, SEC-10)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Consent matrix
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    put:
+      summary: Grant or revoke external provider data transmission consent
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Consent updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/security/secrets/{secretId}:
+    delete:
+      summary: Immediately revoke stored API key or bot token in `secrets_vault` (SEC-04, DST-08)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: secretId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Secret revoked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/sources:
+    get:
+      summary: List configured sources (`Bot API`, `Telegram Export`, `RSS`, `Webhook`) and cursor states (SRC-01..SRC-13)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: List of sources with masked secret hints
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    post:
+      summary: Register an authorized source connection (Customer MTProto user-sessions are rejected by design)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Source created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/sources/{sourceId}/test:
+    post:
+      summary: Test Bot API / feed connectivity and resolve canonical channel ID (`-100...` normalized — SRC-07)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: sourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Source connectivity result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/sources/{sourceId}/exports/presign:
+    post:
+      summary: Issue tenant-prefix-locked S3v4 Presigned POST (`tenants/{tenant_id}/exports/`) for Telegram Desktop Export JSON (SRC-03, SPK-08)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: sourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Presigned upload credentials & job ID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PresignExportResponse' }
+
+  /workspaces/{wsId}/sources/{sourceId}/exports/{exportJobId}/complete:
+    post:
+      summary: Enqueue streaming `ijson (yajl2_c)` archive extraction & deterministic raw S3 deletion (SRC-03, SRC-09, UC-01)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: sourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: exportJobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '202':
+          description: Streaming export parse job queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/content-items:
+    get:
+      summary: Cursor-paginated archive & PostgreSQL GIN `tsvector` search with protection-class filter (SRC-08, NFR-03)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Paginated content items
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+
+  /workspaces/{wsId}/destinations:
+    get:
+      summary: List destinations with maturity tier (`GA`, `OUTBOUND_LIMITED`, `EXPERIMENTAL`) & capability matrix (DST-01, DST-05)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Destinations list without raw tokens
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    post:
+      summary: Add destination with explicit backlog mode (`NEW_ONLY` by default — DST-04)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Destination created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/destinations/{destId}:
+    patch:
+      summary: Enable, pause, update policy, or soft-delete destination (DST-03)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: destId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Destination updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/destinations/{destId}/purge-queue:
+    post:
+      summary: Safely cancel waiting queue tasks for a specific destination while preserving history (DST-03)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: destId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Destination waiting queue cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/destinations/{destId}/test-connection:
+    post:
+      summary: Verify technical bot auth/connectivity without claiming publish permission (DST-02)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: destId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Technical auth check result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/destinations/{destId}/test-publish:
+    post:
+      summary: Send explicit user-confirmed live test post to verify real channel rendering (DST-02, DST-07)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: destId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Live test message receipt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/routes:
+    get:
+      summary: List workflow routes (`COPY` / `RULES` / `AI` / `HYBRID`)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Routes list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    post:
+      summary: Create route disabled by default (`DRAFT_ONLY`) with DAG cycle validation (RULE-06, AUT-01)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Route created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/routes/{routeId}/dry-run:
+    post:
+      summary: Simulate filter, rules, AI, formatting, and destination routing without publishing (RULE-07)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: routeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Step-by-step dry-run decision trace
+          content:
+            application/json:
+              schema: { type: object }
+
+  /workspaces/{wsId}/channel-intelligence/analyses:
+    post:
+      summary: Start isolated channel intelligence sampling & analysis (`ANALYSIS_ISOLATED` scope — CH-01..CH-11, SRC-10)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Analysis job started without entering publication queue
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/channel-intelligence/analyses/{analysisId}:
+    get:
+      summary: Retrieve statistical, AI/Vision, and separated identity report (CH-02..CH-10, IDN-01..IDN-03)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: analysisId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Channel analysis report
+          content:
+            application/json:
+              schema: { type: object }
+    delete:
+      summary: Cancel running channel analysis job (CH-11)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: analysisId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Analysis cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/styles:
+    get:
+      summary: Search and filter versioned style profiles (STY-01..STY-03)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Paginated style profiles
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    post:
+      summary: Create manual or extracted style profile (STY-02)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Style profile created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/styles/compose:
+    post:
+      summary: Create weighted multi-style composition with conflict resolution preview (STY-07)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Composed style revision created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/styles/{styleId}/export:
+    get:
+      summary: Export secret-free portable JSON style package (STY-04, STY-05)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: styleId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Validated style_package.schema.json document
+          content:
+            application/json:
+              schema: { type: object }
+
+  /workspaces/{wsId}/styles/import:
+    post:
+      summary: Validate and import portable JSON style package (STY-04, STY-05)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Imported style revision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/brands:
+    get:
+      summary: List authorized BrandIdentity profiles (IDN-04..IDN-06)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Brand profiles
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    post:
+      summary: Create or update BrandIdentity profile
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Brand profile saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/learning/rules:
+    get:
+      summary: List proposed and approved preference rules per brand/destination (LRN-02, LRN-03)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Learned rules list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+
+  /workspaces/{wsId}/learning/rules/{ruleId}:
+    patch:
+      summary: Approve, edit, or disable a learned preference rule (LRN-04)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: ruleId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Rule updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+    delete:
+      summary: Permanently delete a learned rule or feedback memory (LRN-04, AT-17)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: ruleId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Rule deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/ai/providers:
+    get:
+      summary: List BYOK AI providers, masked key hints, and independent task-modality routing profiles (AIP-01, AIP-06)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: AI providers & routing profiles
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    put:
+      summary: Configure AI provider key (preserves model cache if key SHA-256 fingerprint unchanged — AT-10)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Provider updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/ai/providers/{providerId}/models:
+    get:
+      summary: Return key-fingerprint-bound cached or live model catalog filtered by modality (AIP-02, AIP-03)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: providerId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: modality
+          in: query
+          schema: { type: string, enum: [TEXT, VISION, IMAGE, VIDEO, TTS] }
+        - name: refresh
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Modality-typed model list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+
+  /workspaces/{wsId}/ai/models/probe:
+    post:
+      summary: Consent-gated synthetic probe of selected or compatible models (AIP-07)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Probe latency, modality verification, and classified error result
+          content:
+            application/json:
+              schema: { type: object }
+
+  /workspaces/{wsId}/ai/budgets:
+    get:
+      summary: Retrieve read-only `OPERATOR_PLAN` ceilings + editable `TENANT_BUDGET` sub-caps, active holds, and settled spend (AIP-09, OPS-05, OC-01)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Budget ledger summary
+          content:
+            application/json:
+              schema: { type: object }
+    put:
+      summary: Configure tenant self-imposed `TENANT_BUDGET` sub-caps (`WORKSPACE` / `ROUTE` / `TENANT`; attempts to mutate `OPERATOR_PLAN` fail with `RF007`)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Tenant sub-budget policy saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/ai/executions/{execId}/cancel:
+    post:
+      summary: Cancel in-flight AI request and invalidate late response epoch (AIP-12)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: execId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Execution cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/studio/generate:
+    post:
+      summary: Generate/rewrite brand-neutral candidate(s) under the 4-mode freedom contract (GEN-01..GEN-12)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenerateStudioRequest' }
+      responses:
+        '200':
+          description: Generation session with candidates, FactGuard report, quality signals, and execution trace
+          content:
+            application/json:
+              schema: { type: object }
+
+  /workspaces/{wsId}/media/search:
+    post:
+      summary: Consent-gated licensed stock photo/clip search with provenance metadata (MED-03, MED-04)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Stock media results with license & attribution details
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+
+  /workspaces/{wsId}/media/assets:
+    get:
+      summary: Browse tenant-isolated S3 SHA-256 media library with active reference counts (MED-13)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+      responses:
+        '200':
+          description: Media assets list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+    post:
+      summary: Upload and magic-byte/ffprobe validate user media file into S3 `tenants/{tenant_id}/media/` (MED-01, SEC-05)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Asset stored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/podcast-scripts:
+    post:
+      summary: Save or edit standalone single/two-speaker podcast scenario prior to TTS synthesis (AUD-01)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '201':
+          description: Podcast script saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/media/jobs:
+    post:
+      summary: Enqueue isolated `media-worker` AF_UNIX render/transcode, infographic, sticker, AI image/video, or TTS job (MED-06..MED-12, AUD-03)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Media/audio job accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/media/jobs/{jobId}:
+    delete:
+      summary: Cancel running media-worker job (kills process group) or remote generative video polling job (MED-11, MED-12)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Media job cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/drafts/{draftId}:
+    patch:
+      summary: Edit draft title, rich-text AST, attachments, or brand without re-invoking AI (PUB-01)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: draftId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: New DraftRevision saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/drafts/{draftId}/preview:
+    post:
+      summary: Compile per-destination preview (injecting per-dest BrandIdentity + capability degradation report — FMT-02, IDN-05, PUB-03)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: draftId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Rendered preview per target platform
+          content:
+            application/json:
+              schema: { type: object }
+
+  /workspaces/{wsId}/drafts/{draftId}/publish:
+    post:
+      summary: Freeze immutable PublicationVersion and enqueue per-destination DeliveryTasks (PUB-04..PUB-08)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: draftId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublishDraftRequest' }
+      responses:
+        '202':
+          description: PublicationVersion frozen and delivery tasks queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/deliveries:
+    get:
+      summary: Filter delivery tasks including UNCERTAIN reconciliation items (QUE-08, OPS-03)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+        - name: status
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated delivery tasks
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+
+  /workspaces/{wsId}/deliveries/{taskId}/reconcile:
+    post:
+      summary: Resolve UNCERTAIN delivery via `app.fn_web_reconcile_uncertain_task` with mandatory duplicate-risk acknowledgement on requeue (QUE-08)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReconcileUncertainRequest' }
+      responses:
+        '200':
+          description: Delivery task reconciled and audited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/audit-events:
+    get:
+      summary: Query immutable append-only operational & security audit trail (OPS-04)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+      responses:
+        '200':
+          description: Paginated audit events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedList' }
+
+  /workspaces/{wsId}/reports/export:
+    get:
+      summary: Export secret-redacted, CSV-formula-escaped CSV/JSON operational report (OPS-03)
+      security:
+        - SessionCookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: format
+          in: query
+          required: true
+          schema: { type: string, enum: [csv, json] }
+      responses:
+        '200':
+          description: Exported report stream
+
+  /workspaces/{wsId}/ops/emergency-stop:
+    post:
+      summary: Activate or release workspace emergency stop immediately (QUE-10, AUT-06)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Emergency stop toggled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/ops/reset:
+    post:
+      summary: Export logical pre-reset snapshot, archive history, disable destinations, and cancel waiting queues without deleting remote channel posts (OPS-07)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Operations safely reset
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/maintenance/cleanup:
+    post:
+      summary: Clean expired export staging objects and zero-reference orphan media assets safely (BAK-08)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Cleanup summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/backups:
+    post:
+      summary: Create Argon2id + AEAD (`AES-256-GCM` / `age ChaCha20-Poly1305`) tenant-scoped logical export (BAK-01, BAK-02, OC-03)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '202':
+          description: Tenant logical backup job started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AckResponse' }
+
+  /workspaces/{wsId}/backups/restore:
+    post:
+      summary: Verify AEAD tag first, preview impact, or atomically restore tenant logical archive into Safe Mode re-wrapping secrets under destination Tenant DEK (BAK-03..BAK-05)
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      responses:
+        '200':
+          description: Impact preview or completed safe-mode tenant restore
+          content:
+            application/json:
+              schema: { type: object }
