@@ -1,0 +1,9 @@
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "TID251"]
+
+[lint.flake8-tidy-imports.banned-api]
+"django.db.transaction.on_commit".msg = "Raw transaction.on_commit loses SET LOCAL app.tenant_id; use relayforge.web.db_tx.on_tenant_commit (OC-06)."

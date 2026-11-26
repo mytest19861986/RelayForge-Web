@@ -1,0 +1,25 @@
+[importlinter]
+root_packages =
+    relayforge
+include_external_packages = true
+
+[importlinter:contract:core]
+name = Core depends on neither outer layers nor frameworks
+type = forbidden
+source_modules =
+    relayforge.core
+forbidden_modules =
+    relayforge.web
+    relayforge.adapters
+    relayforge.workers
+    django
+    ninja
+    psycopg
+
+[importlinter:contract:workers]
+name = Workers cannot depend on the web layer
+type = forbidden
+source_modules =
+    relayforge.workers
+forbidden_modules =
+    relayforge.web

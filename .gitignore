@@ -24,13 +24,11 @@ node_modules/
 # Local Environment, Secrets & Ephemeral Artifacts
 .env
 .env.*
-!.env.example
 tmp/
 staging/
 artifacts/
 *.zip
-*.tar
-*.tar.gz
+*.tar*
 *.rfbak
 
 # Disposable G0 Spike Lab Evidence (kept local only)
