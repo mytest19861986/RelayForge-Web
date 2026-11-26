@@ -97,7 +97,10 @@ class SafeDialer:
             )), extra_secrets=self._secrets,
         )
 
-    def request(self, method, url, *, headers=None, content=None):
+    def request(
+        self, method, url, *, headers=None, content=None, allow_error_response=False,
+        follow_redirects=True,
+    ):
         with self._transport:
             try:
                 for hop in range(4):
@@ -114,9 +117,10 @@ class SafeDialer:
                     finally:
                         response.close()
                     if response.status_code not in {301, 302, 303, 307, 308}:
-                        response.raise_for_status()
+                        if not allow_error_response:
+                            response.raise_for_status()
                         return response
-                    if hop == 3 or "location" not in response.headers:
+                    if not follow_redirects or hop == 3 or "location" not in response.headers:
                         raise SSRFBlockedError("Invalid redirect or redirect limit exceeded")
                     next_url = request.url.join(response.headers["location"])
                     if response.status_code == 303 or (

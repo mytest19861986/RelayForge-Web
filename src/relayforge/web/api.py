@@ -12,10 +12,11 @@ from ninja import NinjaAPI
 from ninja.errors import HttpError, ValidationError
 from ninja.security import HttpBearer, SessionAuth
 
-from relayforge.adapters.db_migrator import M1_VERSION, VERSION
-from relayforge.core.security import Role, mask_secret_preview, permitted, scrub_sensitive_text
-from relayforge.web import schemas
+from relayforge.adapters.db_migrator import M1_VERSION, M2_VERSION, VERSION
+from relayforge.core.security import mask_secret_preview, scrub_sensitive_text
+from relayforge.web import destinations_m2, routes_m2, schemas
 from relayforge.web.db import audit, first, lock_tenant, rows, set_context
+from relayforge.web.endpoints import ack, page, require_permission, require_workspace
 from relayforge.web.middleware import COOKIE, cookie_name, sha256
 from relayforge.web.problems import PROBLEMS, ProblemError, problem
 
@@ -45,6 +46,8 @@ api = NinjaAPI(
     docs_url=None, openapi_url=None,
 )
 operator_auth = OperatorBearerAuth()
+api.add_router("", routes_m2.router)
+api.add_router("", destinations_m2.router)
 
 
 @api.exception_handler(ProblemError)
@@ -87,31 +90,6 @@ def handle_unexpected(request, exc):
     return problem(request, 500)
 
 
-def ack(request, *, identifier=None, **fields):
-    return {"ok": True, "correlation_id": request.correlation_id, "id": identifier, **fields}
-
-
-def require_permission(request, action):
-    if not permitted(Role(request.tenant["role"]), action):
-        raise ProblemError(403)
-
-
-def page(items, limit, *, cursor_field="id"):
-    has_more = len(items) > limit
-    return {
-        "items": items[:limit],
-        "page_info": {
-            "limit": limit, "has_more": has_more,
-            "next_cursor": str(items[limit - 1][cursor_field]) if has_more else None,
-        },
-    }
-
-
-def require_workspace(workspace_id):
-    if not first("SELECT id FROM app.workspaces WHERE id = %s", (workspace_id,)):
-        raise ProblemError(404)
-
-
 def create_workspace(tenant_id, slug, display_name, *, using="default"):
     workspace_id = uuid4()
     rows(
@@ -140,9 +118,9 @@ def update_plan_quotas(tenant_id, daily, monthly):
 def health(request):
     count = first(
         "SELECT 1 AS connected, count(*) AS applied FROM app.schema_migrations "
-        "WHERE version IN (%s, %s)", (VERSION, M1_VERSION),
+        "WHERE version IN (%s, %s, %s)", (VERSION, M1_VERSION, M2_VERSION),
     )
-    if count != {"connected": 1, "applied": 2}:
+    if count != {"connected": 1, "applied": 3}:
         raise ProblemError(503)
     return ack(request)
 

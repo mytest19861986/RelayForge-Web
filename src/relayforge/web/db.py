@@ -1,6 +1,10 @@
+import json
 from uuid import uuid4
 
 from django.db import connections
+from psycopg import adapters
+
+JSONB_OID = adapters.types["jsonb"].oid
 
 
 def rows(query, params=(), *, using="default"):
@@ -8,8 +12,16 @@ def rows(query, params=(), *, using="default"):
         cursor.execute(query, params)
         if not cursor.description:
             return []
-        columns = [column.name for column in cursor.description]
-        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+        columns = cursor.description
+        # Django uses raw text for JSONB; model fields normally decode it.
+        return [
+            {
+                column.name: json.loads(value)
+                if column.type_code == JSONB_OID and isinstance(value, str) else value
+                for column, value in zip(columns, row, strict=True)
+            }
+            for row in cursor.fetchall()
+        ]
 
 
 def first(query, params=(), *, using="default"):
