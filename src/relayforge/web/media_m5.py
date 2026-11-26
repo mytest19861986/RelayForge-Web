@@ -7,6 +7,7 @@ from ninja import File, Router, Schema, UploadedFile
 from psycopg.types.json import Jsonb
 from pydantic import Field
 
+from relayforge.adapters.disk_pressure import disk_state
 from relayforge.adapters.media_rpc import media_rpc
 from relayforge.adapters.media_storage import put_media
 from relayforge.adapters.net_guard import OutboundTransportError, SSRFBlockedError
@@ -120,6 +121,8 @@ def store(request, workspace, content, **metadata):
 
 @router.post(ASSET)
 def upload(request, wsId: UUID, file: File[UploadedFile]):
+    if disk_state() == "CRITICAL":
+        raise ProblemError(503, "DISK_PRESSURE_CRITICAL")
     authorize(request, wsId)
     return store(request, wsId, file.read(MAX_BYTES + 1))
 
@@ -161,6 +164,8 @@ def search(request, wsId: UUID, data: StockSearch):
 
 @router.post(ASSET + "/stock-download")
 def download_stock(request, wsId: UUID, data: StockDownload):
+    if disk_state() == "CRITICAL":
+        raise ProblemError(503, "DISK_PRESSURE_CRITICAL")
     authorize(request, wsId)
     try:
         content, attribution = stock(wsId).download(data.stock_id, video=data.media_kind == "VIDEO")
@@ -234,6 +239,8 @@ def edit_script(request, wsId: UUID, scriptId: UUID, data: ScriptInput):
 
 @router.post(JOB)
 def enqueue(request, wsId: UUID, data: MediaJobInput):
+    if disk_state() == "CRITICAL":
+        raise ProblemError(503, "DISK_PRESSURE_CRITICAL")
     authorize(request, wsId)
     key = get_idempotency_token(request)
     tenant = request.tenant["tenant_id"]

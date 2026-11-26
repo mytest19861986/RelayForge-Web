@@ -1,4 +1,4 @@
-name: M0 through M5 gates
+name: M0 through M6 gates
 
 on: [push, pull_request]
 
@@ -25,9 +25,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core postgresql-16 postgresql-client-16
       - run: python -m pip install -e '.[dev]'
       - run: ruff check .
       - run: lint-imports
       - run: python scripts/gates/check_ast_gates.py
       - run: pytest -v tests/unit tests/integration -s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m6-oc03-pitr-evidence
+          path: tmp/m6-oc03-pitr-evidence.json
+          if-no-files-found: error

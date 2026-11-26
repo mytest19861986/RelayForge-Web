@@ -13,7 +13,7 @@ ALLOW_INSECURE_LOCAL_COOKIE = os.environ.get("RF_ALLOW_INSECURE_LOCAL_COOKIE") =
 if os.environ.get("RF_TRUST_PROXY_SSL_HEADER") == "true":
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_TZ = True
-DATA_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = 768 * 1024
 WSGI_APPLICATION = "relayforge.web.wsgi.application"
 LOGGING = {
     "version": 1,

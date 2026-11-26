@@ -12,6 +12,7 @@ from django.http import JsonResponse
 from ninja import Router
 
 from relayforge.adapters.content_store import advance_cursor, bot_post, insert_messages
+from relayforge.adapters.disk_pressure import disk_state
 from relayforge.adapters.messengers import CONNECTORS, MessengerError
 from relayforge.adapters.s3_storage import (
     EXPORT_TTL,
@@ -250,6 +251,8 @@ def test_source(request, wsId: UUID, sourceId: UUID):
 
 @router.post("/workspaces/{wsId}/sources/{sourceId}/exports/presign")
 def export_presign(request, wsId: UUID, sourceId: UUID, data: dto.ExportInput):
+    if disk_state() == "CRITICAL":
+        raise ProblemError(503, "DISK_PRESSURE_CRITICAL")
     require_permission(request, "manage_workspaces")
     source = scoped_source(wsId, sourceId)
     if source["source_kind"] != "TELEGRAM_DESKTOP_EXPORT":

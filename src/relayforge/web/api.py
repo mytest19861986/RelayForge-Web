@@ -21,6 +21,7 @@ from relayforge.web import (
     drafts_m3,
     learning_m4,
     media_m5,
+    ops_m6,
     routes_m2,
     routes_m3,
     schemas,
@@ -68,6 +69,7 @@ api.add_router("", studio_m4.router)
 api.add_router("", styles_m4.router)
 api.add_router("", learning_m4.router)
 api.add_router("", media_m5.router)
+api.add_router("", ops_m6.router)
 
 
 @api.exception_handler(ProblemError)

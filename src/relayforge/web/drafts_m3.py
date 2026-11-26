@@ -152,6 +152,24 @@ def edit_draft(request, wsId: UUID, draftId: UUID, data: dto.DraftPatch):
     return ack(request, identifier=draftId, revision_no=revision)
 
 
+def media_incompatible(media, platform, album_action, text):
+    kinds = {asset["media_kind"] for asset in media}
+    native = len(media) > 1 and album_action is None
+    allowed = {
+        "IMAGE", "INFOGRAPHIC", "STICKER_IMAGE", "VIDEO", "AUDIO",
+        "VOICE_NOTE", "NATIVE_STICKER", "GIF",
+    }
+    return (
+        platform not in {"TELEGRAM", "BALE", "EITAA"} or len(media) > 10
+        or sum(asset["byte_size"] for asset in media) > 50_000_000
+        or not kinds <= allowed
+        or (native and not kinds <= {"IMAGE", "INFOGRAPHIC", "STICKER_IMAGE", "VIDEO"})
+        or ("NATIVE_STICKER" in kinds and bool(text.strip()))
+        or (platform != "TELEGRAM" and bool(kinds & {"VOICE_NOTE", "NATIVE_STICKER"}))
+        or album_action == "CANCEL_FOR_INCOMPATIBLE_DEST"
+    )
+
+
 def _preview(workspace, draft, destinations, album_policy):
     content = rich_text(draft["body_text"], draft["spans_utf16"])
     attachments = draft["media_manifest_json"]
@@ -178,22 +196,9 @@ def _preview(workspace, draft, destinations, album_policy):
                 {key: value for key, value in by_id[item].items() if key != "id"}
                 for item in attachments
             ]
-            native = len(ordered) > 1 and compiled.album_action is None
-            kinds = {asset["media_kind"] for asset in ordered}
-            allowed = {
-                "IMAGE", "INFOGRAPHIC", "STICKER_IMAGE", "VIDEO", "AUDIO",
-                "VOICE_NOTE", "NATIVE_STICKER", "GIF",
-            }
-            invalid = (
-                dest["platform"] not in {"TELEGRAM", "BALE", "EITAA"}
-                or len(ordered) > 10 or sum(asset["byte_size"] for asset in ordered) > 50_000_000
-                or not kinds <= allowed
-                or (native and not kinds <= {"IMAGE", "INFOGRAPHIC", "STICKER_IMAGE", "VIDEO"})
-                or ("NATIVE_STICKER" in kinds and bool(content.plain_text.strip()))
-                or (dest["platform"] != "TELEGRAM"
-                    and bool(kinds & {"VOICE_NOTE", "NATIVE_STICKER"}))
-            )
-            if invalid:
+            if media_incompatible(
+                ordered, dest["platform"], compiled.album_action, content.plain_text
+            ) and compiled.album_action != "CANCEL_FOR_INCOMPATIBLE_DEST":
                 result["degradations"].append("DESTINATION_MEDIA_INCOMPATIBLE")
             result["media"] = ordered
 

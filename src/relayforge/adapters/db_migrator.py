@@ -20,6 +20,7 @@ M2_VERSION = "0003_m2_webhook_lookup_and_export_claim"
 M3_VERSION = "0004_m3_publication_immutability_and_outbox"
 M4_VERSION = "0005_m4_ai_studio_and_style_immutability"
 M5_VERSION = "0006_m5_media_podcast_and_auto_routes"
+M6_VERSION = "0007_m6_ops_and_backups"
 MIGRATIONS = (
     (VERSION, CONTRACTS_DIR / "database_schema.sql"),
     (M1_VERSION, CONTRACTS_DIR.parents[1] / "migrations" / f"{M1_VERSION}.sql"),
@@ -27,6 +28,7 @@ MIGRATIONS = (
     (M3_VERSION, CONTRACTS_DIR.parents[1] / "migrations" / f"{M3_VERSION}.sql"),
     (M4_VERSION, CONTRACTS_DIR.parents[1] / "migrations" / f"{M4_VERSION}.sql"),
     (M5_VERSION, CONTRACTS_DIR.parents[1] / "migrations" / f"{M5_VERSION}.sql"),
+    (M6_VERSION, CONTRACTS_DIR.parents[1] / "migrations" / f"{M6_VERSION}.sql"),
 )
 
 
