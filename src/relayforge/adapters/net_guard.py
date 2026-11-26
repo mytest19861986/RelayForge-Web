@@ -3,6 +3,7 @@ import json
 import logging
 import socket
 import traceback
+from uuid import uuid4
 
 import httpx
 
@@ -189,3 +190,25 @@ class JsonLogFormatter(logging.Formatter):
         if record.stack_info:
             event["stack"] = record.stack_info
         return json.dumps(event, ensure_ascii=False)
+
+
+def multipart(fields, files):
+    boundary = uuid4().hex
+    body = bytearray()
+    for key, value in fields.items():
+        body.extend(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n'.encode()
+        )
+        body.extend((str(value) + "\r\n").encode())
+    for key, (mime, content) in files.items():
+        extension = {"mpeg": "mp3", "quicktime": "mp4", "jpeg": "jpg"}.get(
+            mime.split("/")[1], mime.split("/")[1]
+        )
+        body.extend(
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"; '
+             f'filename="asset.{extension}"\r\nContent-Type: {mime}\r\n\r\n').encode()
+        )
+        body.extend(content)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode())
+    return {"Content-Type": f"multipart/form-data; boundary={boundary}"}, bytes(body)

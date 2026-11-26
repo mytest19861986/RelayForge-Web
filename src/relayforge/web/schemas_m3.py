@@ -32,19 +32,23 @@ class RoutePolicy(Schema):
     filter_ast: dict = Field(default_factory=dict)
     transform_rules: dict = Field(default_factory=dict)
     schedule_policy: dict = Field(default_factory=dict)
+    fallback_policy: Literal[
+        "STOP", "SEND_WITHOUT_MEDIA", "SEND_AUTHORIZED_ORIGINAL",
+        "FALLBACK_MODEL", "HOLD_FOR_REVIEW"
+    ] = "HOLD_FOR_REVIEW"
     daily_post_cap: Annotated[int, Field(strict=True, ge=1, le=5000)] = 50
 
 
 class RouteInput(RoutePolicy):
     slug: WorkspaceSlug
     display_name: Label
-    route_mode: Literal["COPY", "RULES"] = "COPY"
+    route_mode: Literal["COPY", "RULES", "AI", "HYBRID"] = "COPY"
     automation_level: Automation = "DRAFT_ONLY"
 
 
 class RoutePatch(Schema):
     display_name: Label | None = None
-    route_mode: Literal["COPY", "RULES"] | None = None
+    route_mode: Literal["COPY", "RULES", "AI", "HYBRID"] | None = None
     automation_level: Automation | None = None
     is_enabled: StrictBool | None = None
     policy: RoutePolicy | None = None
