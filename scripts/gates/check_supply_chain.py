@@ -24,9 +24,33 @@ DEV = {
     "wheel",
 }
 FALLBACK = {"relayforge": "NOASSERTION", "django-ninja": "MIT", "sqlparse": "BSD-3-Clause"}
-# psycopg is an existing LGPL runtime dependency explicitly required by the work order.
-EXCEPTIONS = {"psycopg": "LGPL-3.0-only", "psycopg-binary": "LGPL-3.0-only"}
-PERMISSIVE = re.compile(r"MIT|BSD|Apache|PSF|ISC|MPL|CMU|HPND|PostgreSQL", re.I)
+# Architecture ADR-002 locks psycopg; SEC-13 permits its dynamically imported LGPL runtime.
+ARCHITECTURE_LINKING_LICENSES = {"psycopg": "LGPL-3.0-only", "psycopg-binary": "LGPL-3.0-only"}
+PERMISSIVE = {
+    "MIT",
+    "MIT-0",
+    "MIT-CMU",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSD 2-Clause License",
+    "BSD 3-Clause License",
+    "Apache-2.0",
+    "PSF-2.0",
+    "ISC",
+    "MPL-2.0",
+    "CMU",
+    "HPND",
+    "PostgreSQL",
+}
+
+
+def allowed_license(name, expression):
+    if name in ARCHITECTURE_LINKING_LICENSES:
+        return expression == ARCHITECTURE_LINKING_LICENSES[name]
+    terms = re.split(r"\s+(?:AND|OR)\s+", expression.replace("(", "").replace(")", ""))
+    return all(term.strip() in PERMISSIVE for term in terms)
+
+
 PRIVATE = re.compile(rb"-----BEGIN (?:RSA |OPENSSH |EC |DSA |ENCRYPTED )?PRIVATE KEY-----")
 TOKEN = re.compile(rb"\b\d{8,12}:[A-Za-z0-9_-]{32,}\b|\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}\b")
 
@@ -68,11 +92,8 @@ def main():
             or dist.metadata.get("License")
             or FALLBACK.get(name, "")
         )
-        if name in EXCEPTIONS:
-            assert license_name == EXCEPTIONS[name], (name, license_name)
-        elif name != "relayforge":
-            assert not re.search("A?GPL", license_name, re.I), (name, license_name)
-            assert PERMISSIVE.search(license_name), (name, license_name)
+        if name != "relayforge":
+            assert allowed_license(name, license_name), (name, license_name)
         components[name] = {
             "type": "library",
             "name": name,

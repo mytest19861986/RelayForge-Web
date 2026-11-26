@@ -68,16 +68,23 @@ def patch_destination(request, wsId: UUID, destId: UUID, data: dto.DestinationPa
     require_permission(request, "manage_workspaces")
     destination = scoped_destination(wsId, destId, for_update=True)
     get_brand(wsId, data.brand_identity_id)
-    if data.is_enabled and (data.is_archived or destination["publish_verified_at"] is None):
+    rekey = data.secret_id is not None and data.secret_id != destination["secret_id"]
+    if rekey:
+        read_secret(wsId, data.secret_id, SECRET_KINDS[destination["platform"]])
+    if data.is_enabled and (
+        rekey or data.is_archived or destination["publish_verified_at"] is None
+    ):
         raise ProblemError(409, "DESTINATION_PUBLISH_NOT_VERIFIED")
     rows("""
         UPDATE app.destinations SET display_name = COALESCE(%s, display_name),
             backlog_mode = COALESCE(%s, backlog_mode), is_archived = COALESCE(%s, is_archived),
             is_enabled = CASE WHEN %s THEN false ELSE COALESCE(%s, is_enabled) END,
+            secret_id = COALESCE(%s, secret_id),
+            publish_verified_at = CASE WHEN %s THEN NULL ELSE publish_verified_at END,
             brand_identity_id = CASE WHEN %s THEN %s ELSE brand_identity_id END,
             updated_at = clock_timestamp() WHERE id = %s
-    """, (data.display_name, data.backlog_mode, data.is_archived, bool(data.is_archived),
-          data.is_enabled, "brand_identity_id" in data.model_fields_set,
+    """, (data.display_name, data.backlog_mode, data.is_archived, bool(data.is_archived) or rekey,
+          data.is_enabled, data.secret_id, rekey, "brand_identity_id" in data.model_fields_set,
           data.brand_identity_id, destId))
     audit(request, "DESTINATION_UPDATED", "DESTINATION", destId, workspace=wsId)
     return ack(request, identifier=destId)

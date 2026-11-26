@@ -421,9 +421,29 @@ def restore(request, wsId: UUID, data: RestoreInput):
                 nonce,
             ),
         )
+    def placeholder(destination_id, kind):
+        if not key:
+            raise ProblemError(409, "BACKUP_DESTINATION_KEY_REQUIRED")
+        identifier = uuid5(wsId, f"relayforge:restore:revoked:{destination_id}:{kind}")
+        nonce, ciphertext = settings.VAULT.encrypt_secret(
+            tenant, wsId, identifier, kind, "REKEY_REQUIRED",
+            key_version=key["key_version"], wrapped_dek=key["wrapped_dek_ciphertext"],
+        )
+        rows("""
+            INSERT INTO app.secrets_vault
+                (id,tenant_id,workspace_id,secret_kind,label,masked_hint,dek_version,
+                 ciphertext_aead,nonce_bytes,is_revoked)
+            VALUES (%s,%s,%s,%s,'Restored destination','[REKEY_REQUIRED]',%s,%s,%s,true)
+            ON CONFLICT (id) DO NOTHING
+        """, (identifier, tenant, wsId, kind, key["key_version"], ciphertext, nonce))
+        return str(identifier)
+
     try:
         if records:
-            apply_logical(wsId, tenant, records, media, secret_map)
+            apply_logical(
+                wsId, tenant, records, media, secret_map,
+                placeholder=None if manifest["includes_reencrypted_secrets"] else placeholder,
+            )
     except (ValueError, StorageError):
         raise ProblemError(422, "LOGICAL_RESTORE_INCOMPATIBLE") from None
     disable_workspace(request, wsId)
