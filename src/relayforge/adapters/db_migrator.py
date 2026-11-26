@@ -16,9 +16,11 @@ class MigrationChecksumMismatchError(RuntimeError):
 
 
 M1_VERSION = "0002_m1_auth_and_shredding_functions"
+M2_VERSION = "0003_m2_webhook_lookup_and_export_claim"
 MIGRATIONS = (
     (VERSION, CONTRACTS_DIR / "database_schema.sql"),
     (M1_VERSION, CONTRACTS_DIR.parents[1] / "migrations" / f"{M1_VERSION}.sql"),
+    (M2_VERSION, CONTRACTS_DIR.parents[1] / "migrations" / f"{M2_VERSION}.sql"),
 )
 
 

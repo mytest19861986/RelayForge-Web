@@ -57,7 +57,7 @@ def mask_secret_preview(raw_secret: str) -> str:
 
 
 _SECRET_VALUE = re.compile(
-    r"(?i)((?:/bot|/bot/|eitaayar\.ir/api/)|(?:bearer\s+)|"
+    r"(?i)((?:/bot|/bot/|eitaayar\.ir/api/|/webhooks/inbound/(?:telegram|bale)/)|(?:bearer\s+)|"
     r"(?:\b(?:key|api_key|token|access_token|secret|(?:__Host-)?rf_session)=)|"
     r"(?:\bx-csrftoken\s*:\s*))([^\s&/?#;,\])\"'<>]+)"
 )

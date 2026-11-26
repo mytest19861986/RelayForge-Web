@@ -131,6 +131,7 @@ class TenantRLSMiddleware:
             not path.startswith(API + "/")
             or path in {API + "/health", API + "/auth/login"}
             or path.startswith(API + "/operator/")
+            or path.startswith(API + "/webhooks/inbound/")
         ):
             return self.get_response(request)
 
