@@ -150,7 +150,7 @@ class MediaServer(socketserver.ThreadingUnixStreamServer):
         super().__init__(socket_path, Handler, bind_and_activate=False)
         try:
             self.server_bind()
-            os.chmod(socket_path, 0o600)
+            os.chmod(socket_path, 0o660 if os.getenv("RF_MEDIA_SHARED_GROUP") == "true" else 0o600)
             self.server_activate()
         except BaseException:
             self.server_close()
@@ -232,10 +232,13 @@ def confined_spec(root, spec):
     import tempfile
 
     stream = tempfile.TemporaryFile(dir=root)
-    with io.TextIOWrapper(stream, encoding="utf-8", write_through=True) as writer:
-        json.dump(spec, writer)
-        writer.seek(0)
-        return writer.detach()
+    try:
+        stream.write(json.dumps(spec, ensure_ascii=False).encode())
+        stream.seek(0)
+    except BaseException:
+        stream.close()
+        raise
+    return stream
 
 
 class Handler(socketserver.StreamRequestHandler):

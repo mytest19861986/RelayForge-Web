@@ -41,6 +41,54 @@ function render(value) {
     };
     results.prepend(button);
   }
+  if (current === "content" && Array.isArray(value.candidates)) {
+    const list = document.createElement("div");
+    list.className = "metrics";
+    for (const item of value.candidates) {
+      const card = document.createElement("article");
+      const verdict = document.createElement("strong");
+      verdict.textContent = item.fact_guard_verdict || "پیشنهاد";
+      const body = document.createElement("p");
+      body.textContent = item.text || "";
+      if (item.fact_guard_verdict === "FACT_MISMATCH_BLOCKED") verdict.className = "warning";
+      card.append(verdict,body);
+      if (item.fact_diff_json) {
+        const detail = document.createElement("pre");
+        detail.textContent = JSON.stringify(item.fact_diff_json, null, 2);
+        card.append(detail);
+      }
+      list.append(card);
+    }
+    results.prepend(list);
+  }
+  if (current === "destinations" && Array.isArray(value.items)) {
+    const list = document.createElement("div");
+    list.className = "metrics";
+    for (const item of value.items) {
+      const card = document.createElement("div");
+      const name = document.createElement("strong");
+      name.textContent = item.display_name;
+      const handle = document.createElement("bdi");
+      handle.dir = "ltr";
+      handle.textContent = item.canonical_chat_id;
+      const badge = document.createElement("p");
+      badge.textContent = item.platform==="EITAA" ? "فقط ارسال خروجی"
+        : item.platform.endsWith("_EXPERIMENTAL") ? "آزمایشی — نیازمند تست زنده" : "فعال GA";
+      if (item.platform.endsWith("_EXPERIMENTAL")) badge.className = "warning";
+      card.append(name,handle,badge);
+      list.append(card);
+    }
+    results.prepend(list);
+  }
+  if (current === "drafts" && Array.isArray(value.destinations)) {
+    for (const item of value.destinations) {
+      if (!item.degradations?.length) continue;
+      const warning = document.createElement("p");
+      warning.className = "warning";
+      warning.textContent = "محدودیت مقصد: " + item.degradations.join("، ");
+      results.prepend(warning);
+    }
+  }
   if (current === "dashboard" && "sources" in value) {
     const summary = document.createElement("div");
     summary.className = "metrics";
@@ -60,7 +108,11 @@ function render(value) {
 
 function operation([label, path, method, fields, data, confirmAction]) {
   const box = document.createElement("form");
-  for (const [name, caption, kind] of fields) {
+  const advanced = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = "تنظیمات پیشرفته";
+  advanced.append(summary);
+  for (const [name, caption, kind, optional] of fields) {
     const wrapper = document.createElement("label");
     wrapper.textContent = caption;
     const input = document.createElement(Array.isArray(kind) ? "select" : kind === "textarea" ? kind : "input");
@@ -69,12 +121,13 @@ function operation([label, path, method, fields, data, confirmAction]) {
       for (const choice of kind) input.add(new Option(choice, choice));
     } else if (input.tagName === "INPUT") {
       input.type = kind;
-      input.required = kind !== "checkbox";
+      input.required = !optional && kind !== "checkbox";
       if (kind === "password") input.autocomplete = "new-password";
     }
     wrapper.append(input);
-    box.append(wrapper);
+    (optional === "advanced" ? advanced : box).append(wrapper);
   }
+  if (advanced.children.length > 1) box.append(advanced);
   const button = document.createElement("button");
   button.textContent = label;
   if (confirmAction) button.className = "danger";
@@ -86,7 +139,9 @@ function operation([label, path, method, fields, data, confirmAction]) {
     box.querySelectorAll('input[type="password"]').forEach(input => {input.value = "";});
     button.disabled = true;
     try {
-      const value = await request(scoped(path.replace("{id}", encodeURIComponent(values.id || ""))), method, method === "GET" ? undefined : data(values));
+      const resolved = path.replace(/\{([a-z_]+)\}/g, (_, name) => encodeURIComponent(values[name] || ""));
+      const endpoint = resolved.startsWith("!") ? resolved.slice(1) : scoped(resolved);
+      const value = await request(endpoint, method, method === "GET" ? undefined : data(values));
       render(value);
       status("انجام شد");
     } catch (error) { status(error.message); }

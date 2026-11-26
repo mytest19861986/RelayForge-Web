@@ -1,0 +1,97 @@
+x-app: &app
+  image: relayforge-app:local
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile.app
+  env_file: .env.prod
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+services:
+  edge-proxy:
+    image: caddy:2.8-alpine
+    env_file: .env.prod
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    networks: [edge_net, egress_net]
+  web-api:
+    <<: *app
+    volumes: [/srv/relayforge/media:/media]
+    networks: [edge_net, data_net, egress_net]
+  worker-engine:
+    <<: *app
+    command: [python, -m, relayforge.workers.dispatcher]
+    networks: [data_net, egress_net]
+  export-ingestor:
+    <<: *app
+    command: [python, -m, relayforge.workers.export_ingestor]
+    networks: [data_net]
+  media-jobs:
+    <<: *app
+    command: [python, -m, relayforge.workers.media_jobs]
+    volumes: [/srv/relayforge/media:/media]
+    environment:
+      RF_MEDIA_SHARED_GROUP: "true"
+    networks: [data_net, egress_net]
+  media-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.media-worker
+    environment:
+      RF_MEDIA_SOCKET_PATH: /media/run/worker.sock
+      RF_MEDIA_STAGING_ROOT: /media/staging
+      RF_MEDIA_SHARED_GROUP: "true"
+    group_add: ["10000"]
+    volumes: [/srv/relayforge/media:/media]
+    network_mode: "none"
+    cpus: "1.5"
+    mem_limit: "1024m"
+    memswap_limit: "1024m"
+    pids_limit: 64
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+  migrate-job:
+    <<: *app
+    command: [python, -m, relayforge.adapters.db_migrator]
+    profiles: [migrate]
+    networks: [data_net]
+    restart: "no"
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p0
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - /srv/relayforge/secrets/pgbouncer-users.txt:/etc/pgbouncer/userlist.txt:ro
+    networks: [data_net]
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - /srv/relayforge/secrets/postgres-password:/run/secrets/postgres-password:ro
+    networks: [data_net]
+  s3-store:
+    image: chrislusf/seaweedfs:3.97
+    command: [server, -s3, -dir=/data, -s3.config=/run/secrets/seaweed-s3.json]
+    volumes:
+      - seaweed-data:/data
+      - /srv/relayforge/secrets/seaweed-s3.json:/run/secrets/seaweed-s3.json:ro
+    networks: [data_net]
+networks:
+  edge_net:
+    internal: true
+  data_net:
+    internal: true
+  egress_net: {}
+volumes:
+  postgres-data:
+  seaweed-data:
+  caddy-data:

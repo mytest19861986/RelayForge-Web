@@ -1,4 +1,4 @@
-name: M0 through M6 gates
+name: M0 through M7 gates
 
 on: [push, pull_request]
 
@@ -20,6 +20,8 @@ jobs:
           --health-retries 20
     env:
       TEST_DATABASE_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:55432/postgres
+      RF_EVIDENCE_OUT: tmp/m7-oc06-db-evidence.json
+      RF_OC02_EVIDENCE_OUT: tmp/m7-oc02-evidence.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,9 +32,11 @@ jobs:
       - run: ruff check .
       - run: lint-imports
       - run: python scripts/gates/check_ast_gates.py
+      - run: python scripts/gates/check_supply_chain.py
+      - run: python scripts/gates/verify_ubuntu2404_host.py --require-ubuntu-2404
       - run: pytest -v tests/unit tests/integration -s
       - uses: actions/upload-artifact@v4
         with:
-          name: m6-oc03-pitr-evidence
-          path: tmp/m6-oc03-pitr-evidence.json
+          name: m7-acceptance-evidence
+          path: tmp/*.json
           if-no-files-found: error

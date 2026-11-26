@@ -23,3 +23,5 @@ pre { direction:ltr; text-align:start; white-space:pre-wrap; overflow-wrap:anywh
 .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:12px; }
 .metrics div { border:1px solid #cadadb; border-radius:8px; padding:10px; }
 .metrics strong { display:block; color:#096c60; font-size:1.5rem; }
+
+.warning { color:#9a4b12; font-weight:700; }

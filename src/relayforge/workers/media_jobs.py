@@ -321,7 +321,9 @@ class MediaJobs:
             root = self.staging / str(job["job_id"])
             script = job["input_spec_json"].get("podcast_script_id")
             try:
-                root.mkdir(mode=0o700)
+                root.mkdir(mode=0o770 if os.getenv("RF_MEDIA_SHARED_GROUP") == "true" else 0o700)
+                if os.getenv("RF_MEDIA_SHARED_GROUP") == "true":
+                    root.chmod(0o2770)
                 data, kind, origin, duration = self.produce(conn, job, root)
                 with conn.transaction():
                     self.tenant(conn, job)

@@ -8,7 +8,12 @@ from pathlib import Path
 import psycopg
 
 VERSION = "0001_initial_web_saas_v2"
-CONTRACTS_DIR = Path(__file__).resolve().parents[3] / "RelayForge_Architecture/contracts"
+CONTRACTS_DIR = Path(
+    os.environ.get(
+        "RF_CONTRACTS_DIR",
+        Path(__file__).resolve().parents[3] / "RelayForge_Architecture/contracts",
+    )
+)
 
 
 class MigrationChecksumMismatchError(RuntimeError):

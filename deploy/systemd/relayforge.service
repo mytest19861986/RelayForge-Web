@@ -1,0 +1,15 @@
+[Unit]
+Description=RelayForge Web
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/relayforge/checkout
+ExecStart=/usr/bin/docker compose -f deploy/docker-compose.prod.yml up -d
+ExecStop=/usr/bin/docker compose -f deploy/docker-compose.prod.yml stop
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
