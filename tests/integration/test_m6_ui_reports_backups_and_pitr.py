@@ -97,7 +97,17 @@ def test_authentic_postgres16_pitr(tmp_path, monkeypatch):
     cmd = shlex.join([sys.executable, str(archive_tool)])
     run = subprocess.run
     run(
-        [tools["initdb"], "-D", str(source), "-U", "postgres", "-A", "trust", "--no-locale"],
+        [
+            tools["initdb"],
+            "-D",
+            str(source),
+            "-U",
+            "postgres",
+            "-A",
+            "trust",
+            "--no-locale",
+            "--encoding=UTF8",
+        ],
         check=True,
         capture_output=True,
         timeout=30,
@@ -160,7 +170,7 @@ def test_authentic_postgres16_pitr(tmp_path, monkeypatch):
         deadline = time.monotonic() + 45
         while not sealed_wal.exists() and time.monotonic() < deadline:
             time.sleep(0.15)
-        assert sealed_wal.exists()
+        assert sealed_wal.exists(), source.with_suffix(".log").read_text()
         for encrypted, label in ((sealed_base, "base"), (sealed_wal, segment)):
             content = bytearray(encrypted.read_bytes())
             content[len(content) // 2] ^= 1
