@@ -14,9 +14,11 @@ from cryptography.exceptions import InvalidTag
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from relayforge.adapters.media_storage import read_media
 from relayforge.adapters.messengers import CONNECTORS, MessengerError
 from relayforge.adapters.net_guard import OutboundTransportError
 from relayforge.adapters.publications import outbox
+from relayforge.adapters.s3_storage import S3Storage, StorageError
 from relayforge.adapters.vault import EnvelopeSecretVault
 from relayforge.core.security import SecretRevokedError, TenantKeyShreddedError
 
@@ -29,7 +31,9 @@ def tenant_context(conn, tenant):
 
 
 class Dispatcher:
-    def __init__(self, dsn, worker_id, vault, *, ttl=30, connectors=None, hook=None):
+    def __init__(self, dsn, worker_id, vault, *, ttl=30, connectors=None, hook=None,
+                 media_storage=None):
+        self.media_storage = media_storage
         self.dsn, self.worker_id, self.vault = dsn, worker_id, vault
         self.ttl = min(600, max(15, ttl))
         self.connectors = CONNECTORS if connectors is None else connectors
@@ -205,15 +209,27 @@ class Dispatcher:
 
     def _send(self, task, token, delivery):
         try:
-            receipt = self.connectors[delivery["platform"]]().send_message(
-                token, delivery["chat_id"], delivery["payload"],
-            )
+            connector = self.connectors[delivery["platform"]]()
+            if assets := delivery.get("media"):
+                storage = self.media_storage or S3Storage.from_environment()
+                media = [(asset, read_media(storage, asset["s3_object_key"])) for asset in assets]
+                receipt = connector.send_media(
+                    token, delivery["chat_id"], delivery["payload"], media,
+                    delivery["album_action"],
+                )
+            else:
+                receipt = connector.send_message(token, delivery["chat_id"], delivery["payload"])
+        except (StorageError, ValueError, KeyError):
+            return "FAILED", "PERMANENT_ERROR", {"code": "MEDIA_STORAGE_UNAVAILABLE"}
         except OutboundTransportError:
             return "UNCERTAIN", "TIMEOUT_UNCERTAIN", {"code": "OUTBOUND_CONFIRMATION_MISSING"}
         except MessengerError as error:
             code = error.category
             if error.delivery_uncertain:
-                return "UNCERTAIN", "TIMEOUT_UNCERTAIN", {"code": "OUTBOUND_CONFIRMATION_MISSING"}
+                return "UNCERTAIN", "TIMEOUT_UNCERTAIN", {
+                    "code": "OUTBOUND_CONFIRMATION_MISSING",
+                    "remote": ",".join(error.receipts) or None,
+                }
             if code in {"RATE_LIMIT_429", "TRANSIENT_NETWORK"} and (
                 task["attempts"] < task["max_attempts"]
             ):

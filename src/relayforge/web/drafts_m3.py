@@ -35,6 +35,7 @@ def _validate_assets(workspace, assets):
     ids = [UUID(str(value)) for value in assets]
     found = rows("""
         SELECT id FROM app.media_assets WHERE workspace_id = %s AND id = ANY(%s)
+          AND NOT is_deleted ORDER BY id FOR UPDATE
     """, (workspace, ids))
     if len(found) != len(ids):
         raise ProblemError(404)
@@ -154,6 +155,13 @@ def edit_draft(request, wsId: UUID, draftId: UUID, data: dto.DraftPatch):
 def _preview(workspace, draft, destinations, album_policy):
     content = rich_text(draft["body_text"], draft["spans_utf16"])
     attachments = draft["media_manifest_json"]
+    assets = rows("""
+        SELECT id,media_kind,mime_type,byte_size,s3_object_key
+        FROM app.media_assets WHERE workspace_id=%s AND id=ANY(%s) AND NOT is_deleted
+    """, (workspace, [UUID(item) for item in attachments]))
+    by_id = {str(asset["id"]): asset for asset in assets}
+    if len(by_id) != len(attachments):
+        raise ProblemError(409, "MEDIA_ASSET_UNAVAILABLE")
     results = []
     for dest in destinations:
         brand = get_brand(workspace, dest["brand_identity_id"] or draft["brand_identity_id"])
@@ -166,7 +174,29 @@ def _preview(workspace, draft, destinations, album_policy):
             raise ProblemError(422, "INVALID_RENDERED_CONTENT") from None
         result = asdict(compiled)
         if attachments:
-            result["degradations"].append("MEDIA_DELIVERY_NOT_AVAILABLE")
+            ordered = [
+                {key: value for key, value in by_id[item].items() if key != "id"}
+                for item in attachments
+            ]
+            native = len(ordered) > 1 and compiled.album_action is None
+            kinds = {asset["media_kind"] for asset in ordered}
+            allowed = {
+                "IMAGE", "INFOGRAPHIC", "STICKER_IMAGE", "VIDEO", "AUDIO",
+                "VOICE_NOTE", "NATIVE_STICKER", "GIF",
+            }
+            invalid = (
+                dest["platform"] not in {"TELEGRAM", "BALE", "EITAA"}
+                or len(ordered) > 10 or sum(asset["byte_size"] for asset in ordered) > 50_000_000
+                or not kinds <= allowed
+                or (native and not kinds <= {"IMAGE", "INFOGRAPHIC", "STICKER_IMAGE", "VIDEO"})
+                or ("NATIVE_STICKER" in kinds and bool(content.plain_text.strip()))
+                or (dest["platform"] != "TELEGRAM"
+                    and bool(kinds & {"VOICE_NOTE", "NATIVE_STICKER"}))
+            )
+            if invalid:
+                result["degradations"].append("DESTINATION_MEDIA_INCOMPATIBLE")
+            result["media"] = ordered
+
         results.append({"destination_id": str(dest["id"]), "media_asset_ids": attachments,
                         **result})
     return results
@@ -234,8 +264,6 @@ def publish(request, wsId: UUID, draftId: UUID, data: dto.PublishInput):
         """, (draft["source_content_item_id"], wsId))
         if not source or source != {"access_class": "PROCESSABLE", "is_deleted_upstream": False}:
             raise ProblemError(422, "SOURCE_CONTENT_NOT_PUBLISHABLE")
-    if draft["media_manifest_json"]:
-        raise ProblemError(422, "MEDIA_DELIVERY_NOT_AVAILABLE")
     rows("SELECT pg_advisory_xact_lock_shared(hashtextextended(%s, 6))", (str(wsId),))
     workspace = first("SELECT emergency_stop FROM app.workspaces WHERE id = %s", (wsId,))
     if workspace["emergency_stop"]:
@@ -244,14 +272,22 @@ def publish(request, wsId: UUID, draftId: UUID, data: dto.PublishInput):
     if any(not dest["is_enabled"] for dest in destinations):
         raise ProblemError(409, "DESTINATION_PAUSED")
     rendered = _preview(wsId, draft, destinations, data.album_fallback_policy)
-    if any(item["length_overflow"] or not item["payload"]["plain_text"].strip()
-           for item in rendered):
+    if any(
+        item["length_overflow"]
+        or (not item["payload"]["plain_text"].strip() and not item.get("media"))
+        or "DESTINATION_MEDIA_INCOMPATIBLE" in item["degradations"]
+        for item in rendered
+    ):
         raise ProblemError(422, "DESTINATION_CONTENT_INCOMPATIBLE")
     now, when = _publish_time(data.schedule)
     targets = [{
         "id": dest["id"], "platform": dest["platform"], "chat_id": dest["canonical_chat_id"],
         "payload": item["payload"], "scheduled_for": when, "degradations": item["degradations"],
-    } for dest, item in zip(destinations, rendered, strict=True)]
+        "media": item.get("media"), "album_action": item["album_action"],
+    } for dest, item in zip(destinations, rendered, strict=True)
+        if item["album_action"] != "CANCEL_FOR_INCOMPATIBLE_DEST"]
+    if not targets:
+        raise ProblemError(422, "DESTINATION_CONTENT_INCOMPATIBLE")
     with connections["default"].cursor() as cursor:
         tasks = freeze_publication(
             cursor, tenant, wsId, identifier, targets, intent=data.mode,
@@ -259,6 +295,7 @@ def publish(request, wsId: UUID, draftId: UUID, data: dto.PublishInput):
             draft_revision=draft["current_revision_no"], route_id=draft["route_id"],
             route_revision=draft["route_policy_revision_no"], actor=request.tenant["user_id"],
             request_hash=request_hash, source_item=draft["source_content_item_id"],
+            media_asset_ids=draft["media_manifest_json"],
         )
     rows("UPDATE app.drafts SET approval_state = 'APPROVED' WHERE id = %s", (draftId,))
     audit(request, f"PUBLICATION_{data.mode}", "PUBLICATION", identifier, workspace=wsId)

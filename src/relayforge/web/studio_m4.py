@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 from pydantic import Field
 
 from relayforge.adapters.ai_gateway import MODEL_ID, AIError
+from relayforge.adapters.ai_media import synthetic_probe
 from relayforge.core.fact_guard import candidate, prompts
 from relayforge.core.intelligence import digest, strip_identity
 from relayforge.core.rich_text import CanonicalRichText, FormatSpanUtf16, SafePlaceholderTemplate
@@ -69,7 +70,20 @@ def _context(conn, request):
 
 
 def run_attempt(
-    conn, request, workspace, row, api, model, kind, estimate, system, prompt, *, image=None
+    conn,
+    request,
+    workspace,
+    row,
+    api,
+    model,
+    kind,
+    estimate,
+    system,
+    prompt,
+    *,
+    image=None,
+    execute=None,
+    route_id=None,
 ):
     tenant = request.tenant["tenant_id"]
     execution, reservation = uuid4(), uuid4()
@@ -77,8 +91,8 @@ def run_attempt(
         _context(conn, request)
         try:
             conn.execute(
-                "SELECT app.fn_budget_reserve(%s,%s,NULL,%s,%s,1800)",
-                (reservation, workspace, str(execution), estimate),
+                "SELECT app.fn_budget_reserve(%s,%s,%s,%s,%s,1800)",
+                (reservation, workspace, route_id, str(execution), estimate),
             )
         except psycopg.Error as error:
             if error.sqlstate in {"RF001", "RF006"}:
@@ -104,7 +118,7 @@ def run_attempt(
     started = monotonic()
     error = output = None
     try:
-        output = api.generate(model, system, prompt, image=image)
+        output = execute() if execute else api.generate(model, system, prompt, image=image)
     except AIError as failure:
         error = failure
     spent = output is not None or (error and error.spent)
@@ -282,14 +296,14 @@ def probe(request, wsId: UUID, data: ProbeInput):
         raise ProblemError(422)
     row = provider(wsId, data.provider_id)
     api, _ = authorized_adapter(wsId, row, data.modality)
-    if data.modality not in {"TEXT", "VISION"}:
-        raise ProblemError(422, "PROBE_MODALITY_NOT_IMPLEMENTED")
     image = (
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42m"
         "P8/x8AAwMCAO+jf2sAAAAASUVORK5CYII="
         if data.modality == "VISION"
         else None
     )
+    media_probe = data.modality in {"IMAGE", "TTS", "VIDEO"}
+    started = monotonic()
     with _new_connection() as conn:
         try:
             identifier, _ = run_attempt(
@@ -304,10 +318,18 @@ def probe(request, wsId: UUID, data: ProbeInput):
                 "Return a JSON object with a text field.",
                 "Synthetic prompt: reply with OK.",
                 image=image,
+                execute=(lambda: synthetic_probe(api, data.model_id, data.modality))
+                if media_probe
+                else None,
             )
         except AIError as error:
             return ai_problem(request, error)
-    return {"execution_id": identifier, "status": "SUCCEEDED", "verified_modality": data.modality}
+    return {
+        "execution_id": identifier,
+        "status": "SUCCEEDED",
+        "verified_modality": data.modality,
+        "latency_ms": int((monotonic() - started) * 1000),
+    }
 
 
 @router.post(ROOT + "/studio/generate")

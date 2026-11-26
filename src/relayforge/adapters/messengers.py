@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode
 
-from relayforge.adapters.net_guard import OutboundTransportError, SafeDialer
+from relayforge.adapters.net_guard import OutboundTransportError, SafeDialer, multipart
 from relayforge.core.rich_text import CompilationResult
 
 
@@ -15,9 +15,10 @@ class PublishReceipt:
 
 
 class MessengerError(RuntimeError):
-    def __init__(self, category, *, retry_after_sec=None, delivery_uncertain=False):
+    def __init__(self, category, *, retry_after_sec=None, delivery_uncertain=False, receipts=()):
         super().__init__(category)
         self.category = category
+        self.receipts = tuple(receipts)
         self.retry_after_sec = retry_after_sec
         self.delivery_uncertain = delivery_uncertain
 
@@ -48,6 +49,14 @@ def _error(status, document, headers, *, polling=False):
     return MessengerError("INCOMPATIBLE_PAYLOAD")
 
 
+MEDIA_METHODS = {
+    "IMAGE": ("sendPhoto", "photo"), "STICKER_IMAGE": ("sendPhoto", "photo"),
+    "INFOGRAPHIC": ("sendPhoto", "photo"), "VIDEO": ("sendVideo", "video"),
+    "AUDIO": ("sendAudio", "audio"), "VOICE_NOTE": ("sendVoice", "voice"),
+    "NATIVE_STICKER": ("sendSticker", "sticker"), "GIF": ("sendAnimation", "animation"),
+}
+
+
 class TelegramBotAdapter:
     base_url = "https://api.telegram.org"
     platform_tier = "GA"
@@ -71,10 +80,10 @@ class TelegramBotAdapter:
             return document.get("result", {})
         return None
 
-    def _call(self, token, method, payload, *, polling=False):
+    def _call(self, token, method, payload, *, polling=False, files=None):
         self._check_token(token)
         dialer = self._dialer or SafeDialer(extra_secrets=(token,))
-        headers, data = self._encode(payload)
+        headers, data = multipart(payload, files) if files else self._encode(payload)
         try:
             response = dialer.request(
                 "POST", self._url(token, method), headers=headers, content=data,
@@ -144,6 +153,65 @@ class TelegramBotAdapter:
             raise MessengerError("TRANSIENT_NETWORK", delivery_uncertain=True)
         return PublishReceipt(str(identifier))
 
+    def _caption(self, payload):
+        if "html" in payload:
+            return {"caption": payload["html"], "parse_mode": "HTML"}
+        caption = {"caption": payload["plain_text"]}
+        if payload.get("entities"):
+            caption["caption_entities"] = payload["entities"]
+        return caption
+
+    def send_media(self, token, chat_id, payload, media, album_action):
+        receipts = []
+        caption = self._caption(payload)
+        if len(media) > 1 and album_action is None:
+            files = {}
+            items = []
+            for index, (asset, data) in enumerate(media):
+                field = f"asset{index}"
+                _, kind = MEDIA_METHODS[asset["media_kind"]]
+                files[field] = (asset["mime_type"], data)
+                items.append({"type": kind, "media": f"attach://{field}"}
+                             | (caption if index == 0 else {}))
+            sent = self._call(
+                token, "sendMediaGroup", {"chat_id": chat_id, "media": json.dumps(items)},
+                files=files,
+            )
+            if not isinstance(sent, list) or len(sent) != len(media):
+                raise MessengerError("TRANSIENT_NETWORK", delivery_uncertain=True)
+            receipts = [self._media_id(item, token) for item in sent]
+        else:
+            for index, (asset, data) in enumerate(media):
+                method, field = self._media_method(asset["media_kind"])
+                fields = {"chat_id": chat_id}
+                if index == 0 and field != "sticker":
+                    fields.update(caption)
+                    if "caption_entities" in fields:
+                        fields["caption_entities"] = json.dumps(fields["caption_entities"])
+                try:
+                    sent = self._call(
+                        token, method, fields, files={field: (asset["mime_type"], data)},
+                    )
+                    receipts.append(self._media_id(sent, token))
+                except MessengerError:
+                    if receipts:
+                        raise MessengerError(
+                            "TRANSIENT_NETWORK", delivery_uncertain=True, receipts=receipts,
+                        ) from None
+                    raise
+        return PublishReceipt(",".join(receipts))
+
+    @staticmethod
+    def _media_id(sent, token):
+        value = str(sent.get("message_id", "")) if isinstance(sent, dict) else ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) or token in value:
+            raise MessengerError("TRANSIENT_NETWORK", delivery_uncertain=True)
+        return value
+
+    @staticmethod
+    def _media_method(kind):
+        return MEDIA_METHODS[kind]
+
     def test_publish(self, token, chat_id, compiled_payload, *, explicit_user_confirmation):
         if explicit_user_confirmation is not True:
             raise MessengerError("PERMISSION_DENIED")
@@ -191,6 +259,10 @@ class EitaayarAdapter(TelegramBotAdapter):
 
     def _encode(self, payload):
         return {"Content-Type": "application/x-www-form-urlencoded"}, urlencode(payload).encode()
+
+    @staticmethod
+    def _media_method(kind):
+        return "sendDocument", "document"
 
     def test_connection(self, token):
         self._check_token(token)

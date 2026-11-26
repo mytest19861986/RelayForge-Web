@@ -25,6 +25,7 @@ from relayforge.core.rules import (
 )
 from relayforge.core.scheduling import catch_up, scheduled_for
 from relayforge.web import schemas_m3 as dto
+from relayforge.web.auto_orchestrator import AutoPublishRiskGate, rewrite
 from relayforge.web.db import audit, first, rows
 from relayforge.web.endpoints import ack, page, require_permission, require_workspace
 from relayforge.web.problems import ProblemError
@@ -40,7 +41,7 @@ from relayforge.web.publications_common import (
 router = Router()
 POLICY_COLUMNS = """
     p.source_ids_json, p.destination_overrides_json, p.filter_ast_json,
-    p.transform_rules_json, p.schedule_policy_json, p.daily_post_cap
+    p.transform_rules_json, p.schedule_policy_json, p.daily_post_cap, p.fallback_policy
 """
 
 
@@ -97,7 +98,7 @@ def _route(workspace, identifier, *, lock=False):
         FROM app.routes r JOIN app.route_policy_revisions p ON p.tenant_id = r.tenant_id
             AND p.route_id = r.id AND p.revision_no = r.active_policy_revision
         WHERE r.workspace_id = %s AND r.id = %s
-    """ + (" FOR UPDATE OF r" if lock else ""), (workspace, identifier))
+    """ + (" FOR NO KEY UPDATE OF r" if lock else ""), (workspace, identifier))
     if result is None:
         raise ProblemError(404)
     return result
@@ -155,12 +156,12 @@ def _insert_policy(request, route, number, data, overrides):
     rows("""
         INSERT INTO app.route_policy_revisions (id, tenant_id, route_id, revision_no,
             source_ids_json, destination_overrides_json, filter_ast_json, transform_rules_json,
-            schedule_policy_json, daily_post_cap)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            schedule_policy_json, daily_post_cap, fallback_policy)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (uuid4(), request.tenant["tenant_id"], route, number,
           Jsonb([str(identifier) for identifier in data.source_ids]), Jsonb(overrides),
           Jsonb(data.filter_ast), Jsonb(data.transform_rules), Jsonb(data.schedule_policy),
-          data.daily_post_cap))
+          data.daily_post_cap, data.fallback_policy))
 
 
 @router.get("/workspaces/{wsId}/routes")
@@ -270,7 +271,8 @@ def _daily_limit(route_id, cap, zone, at):
 
 def _compile_target(workspace, ws, route, info, content, destination, override, compiled, now):
     defaults = ws["settings"].get("route_defaults", {})
-    route_policy = route["transform_rules_json"] if route["route_mode"] == "RULES" else {}
+    route_policy = (route["transform_rules_json"]
+                    if route["route_mode"] in {"RULES", "AI", "HYBRID"} else {})
     settings = resolve_policy(defaults, route_policy, override)
     brand = get_brand(workspace, override.get("brand_identity_id")
                       or destination["brand_identity_id"] or settings.get("brand_identity_id"))
@@ -355,7 +357,8 @@ class RouteWriteSink:
         """, (identifier, tenant, workspace, route["id"], revision, item, decision,
               request.tenant["user_id"]))
         base = _workspace(workspace)["settings"].get("route_defaults", {})
-        common = base | (route["transform_rules_json"] if route["route_mode"] == "RULES" else {})
+        common = base | (route["transform_rules_json"]
+                         if route["route_mode"] in {"RULES", "AI", "HYBRID"} else {})
         brand = common.get("brand_identity_id")
         if brand:
             get_brand(workspace, brand)
@@ -370,8 +373,6 @@ class RouteWriteSink:
 
 
 def run_pipeline(request, workspace, route, info, sink):
-    if route["route_mode"] not in {"COPY", "RULES"}:
-        raise ProblemError(422, "ROUTE_MODE_NOT_AVAILABLE")
     source_id = str(info["source_id"])
     content = rich_text(info["plain_text"], info["entities_ast_json"])
     if info["id"] and source_id not in route["source_ids_json"]:
@@ -388,7 +389,8 @@ def run_pipeline(request, workspace, route, info, sink):
     compiled = compile_filter(route["filter_ast_json"])
     trace, targets, now = [], [], datetime.now(UTC)
     hold = duplicate == "AMBIGUOUS_NEAR_DUPLICATE_HOLD_REVIEW"
-    for destination in get_destinations(workspace, list(overrides)):
+    destinations = get_destinations(workspace, list(overrides))
+    for destination in destinations:
         step, target, needs_review = _compile_target(
             workspace, ws, route, info, content, destination,
             overrides[str(destination["id"])], compiled, now,
@@ -404,6 +406,9 @@ def run_pipeline(request, workspace, route, info, sink):
     elif all(step.get("schedule_decision") == "SKIP_EXPIRED" for step in trace
              if step["matched"]):
         decision = "SKIP_EXPIRED"
+    elif all(step.get("schedule_decision") == "DAILY_CAP_REACHED" for step in trace
+             if step["matched"]):
+        decision = "DAILY_CAP_REACHED"
     elif hold or route["automation_level"] == "APPROVAL_REQUIRED":
         decision = "NEEDS_REVIEW"
     elif route["automation_level"] == "DRAFT_ONLY" or not route["is_enabled"]:
@@ -414,10 +419,60 @@ def run_pipeline(request, workspace, route, info, sink):
         decision = "ENQUEUED"
     else:
         decision = "SKIP_UNAVAILABLE_OR_EXPIRED"
+    ai_trace = {}
+    automated = route["route_mode"] in {"AI", "HYBRID"} and isinstance(sink, RouteWriteSink)
+    if (
+        automated and decision in {"ENQUEUED", "EDITING", "NEEDS_REVIEW"}
+        and route["is_enabled"] and not ws["emergency_stop"]
+        and info["access_class"] == "PROCESSABLE" and not info.get("media_manifest_json")
+        and duplicate != "AMBIGUOUS_NEAR_DUPLICATE_HOLD_REVIEW"
+    ):
+        text, guard, ai_trace = rewrite(request, workspace, route, content.plain_text)
+        policy = route["transform_rules_json"]
+        risk = AutoPublishRiskGate.evaluate(
+            guard, policy.get("freedom_mode", "BALANCED"), policy,
+            has_media=bool(info.get("media_manifest_json")),
+        )
+        ai_trace["risk_gate"] = risk
+        if risk:
+            decision = "NEEDS_REVIEW"
+        if text is not None and not risk:
+            content = CanonicalRichText(text)
+            trace, targets = [], []
+            for destination in destinations:
+                step, target, needs_review = _compile_target(
+                    workspace, ws, route, info, content, destination,
+                    overrides[str(destination["id"])], compiled, now,
+                )
+                trace.append(step)
+                if target:
+                    targets.append(target)
+                if needs_review:
+                    decision = "NEEDS_REVIEW"
+            if not targets:
+                decision = "NEEDS_REVIEW"
+        elif text is None:
+            rights = first("SELECT republish_rights_attested FROM app.sources WHERE id=%s",
+                           (info["source_id"],))
+            if route["fallback_policy"] == "STOP":
+                decision = "AI_FAILED_STOP"
+            elif not (route["fallback_policy"] == "SEND_AUTHORIZED_ORIGINAL"
+                      and rights and rights["republish_rights_attested"] and not risk):
+                decision = "NEEDS_REVIEW"
     result = sink.apply(
         request, workspace, route, info["id"], content, candidate, targets, decision,
     )
-    return {"decision": decision, "deduplication": duplicate, "destinations": trace, **result}
+    if automated:
+        result_ids = {
+            key: [str(item) for item in value] if isinstance(value, list) else str(value)
+            for key, value in result.items()
+        }
+        event(request, workspace, "auto.route.run", {
+            "route_id": str(route["id"]), "source_content_item_id": str(info["id"]),
+            "decision": decision, **ai_trace, **result_ids,
+        })
+    return {"decision": decision, "deduplication": duplicate, "destinations": trace,
+            **ai_trace, **result}
 
 
 @router.post("/workspaces/{wsId}/routes/{routeId}/dry-run")
@@ -445,3 +500,19 @@ def run_item(request, wsId: UUID, routeId: UUID, data: dto.RouteItem):
     return run_pipeline(
         request, wsId, route, _source_content(wsId, data.content_item_id), RouteWriteSink(),
     )
+
+
+@router.get("/workspaces/{wsId}/reports/automated-runs")
+def automated_runs(request, wsId: UUID):
+    require_workspace(wsId)
+    items = rows("""
+        SELECT o.payload_json AS run,o.created_at,coalesce((
+            SELECT jsonb_agg(jsonb_build_object('id', t.id, 'status', t.status,
+                'remote_message_id', t.remote_message_id) ORDER BY t.id)
+            FROM app.delivery_tasks t
+            WHERE t.publication_version_id=(o.payload_json->>'publication_version_id')::uuid
+        ), '[]'::jsonb) AS delivery_tasks
+        FROM app.domain_outbox o WHERE o.workspace_id=%s AND o.event_type='auto.route.run'
+        ORDER BY o.created_at DESC,o.id LIMIT 100
+    """, (wsId,))
+    return {"items": items, "next_cursor": None}

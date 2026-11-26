@@ -1,0 +1,7 @@
+FROM alpine:3.20
+RUN apk add --no-cache ffmpeg python3 py3-pillow ttf-dejavu \
+    && addgroup -g 10001 media && adduser -D -H -u 10001 -G media media
+COPY src/relayforge /opt/relayforge
+ENV PYTHONPATH=/opt PYTHONDONTWRITEBYTECODE=1 RF_MEDIA_SOCKET_PATH=/run/media/worker.sock RF_MEDIA_STAGING_ROOT=/staging
+USER 10001:10001
+ENTRYPOINT ["python3", "-m", "relayforge.workers.media_worker"]

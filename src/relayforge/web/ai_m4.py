@@ -32,6 +32,11 @@ class ProviderInput(Schema):
 class ManualModel(Schema):
     model_id: str
     modalities: list[str] = Field(min_length=1, max_length=5)
+    supported_resolutions: list[Literal["1K", "2K", "4K"]] = Field(
+        default_factory=lambda: ["1K"],
+        min_length=1,
+        max_length=3,
+    )
 
 
 class BudgetInput(Schema):
@@ -268,13 +273,15 @@ def save_provider(request, wsId: UUID, data: ProviderInput):
     return ack(request, identifier=identifier)
 
 
-def cache_model(tenant, row, model, kinds, basis):
+def cache_model(tenant, row, model, kinds, basis, resolutions=("1K",)):
     rows(
         """
         INSERT INTO app.ai_model_cache (id,tenant_id,provider_id,model_id,
-            key_fingerprint_sha256,modalities_json,rank_basis) VALUES (%s,%s,%s,%s,%s,%s,%s)
+            key_fingerprint_sha256,modalities_json,rank_basis,supported_resolutions_json)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (tenant_id,provider_id,model_id,key_fingerprint_sha256)
         DO UPDATE SET modalities_json=excluded.modalities_json,rank_basis=excluded.rank_basis,
+            supported_resolutions_json=excluded.supported_resolutions_json,
             discovered_at=clock_timestamp()
         WHERE app.ai_model_cache.rank_basis <> 'MANUAL' OR excluded.rank_basis = 'MANUAL'
     """,
@@ -286,6 +293,7 @@ def cache_model(tenant, row, model, kinds, basis):
             row["key_fingerprint_sha256"],
             Jsonb(sorted(set(kinds))),
             basis,
+            Jsonb(sorted(set(resolutions))),
         ),
     )
 
@@ -313,7 +321,7 @@ def models(request, wsId: UUID, providerId: UUID, modality: str = "TEXT", refres
             cache_model(request.tenant["tenant_id"], row, model, kinds, "HEURISTIC")
     items = rows(
         """
-        SELECT model_id, modalities_json, pricing_source, rank_basis
+        SELECT model_id, modalities_json, pricing_source, rank_basis, supported_resolutions_json
         FROM app.ai_model_cache WHERE provider_id = %s AND key_fingerprint_sha256 = %s
           AND jsonb_exists(modalities_json, %s) ORDER BY model_id
     """,
@@ -328,7 +336,14 @@ def manual_model(request, wsId: UUID, providerId: UUID, data: ManualModel):
     if not MODEL_ID.fullmatch(data.model_id) or not set(data.modalities) <= MODALITIES:
         raise ProblemError(422, "INVALID_MODEL")
     row = provider(wsId, providerId)
-    cache_model(request.tenant["tenant_id"], row, data.model_id, data.modalities, "MANUAL")
+    cache_model(
+        request.tenant["tenant_id"],
+        row,
+        data.model_id,
+        data.modalities,
+        "MANUAL",
+        data.supported_resolutions,
+    )
     return ack(request, identifier=data.model_id)
 
 
@@ -407,6 +422,7 @@ def cancel_execution(request, wsId: UUID, execId: UUID):
 class WorkspaceAISettings(Schema):
     allow_external_ai: bool = Field(strict=True)
     allow_feedback_learning: bool = Field(strict=True)
+    allow_external_media_search: bool | None = Field(default=None, strict=True)
 
 
 @router.put(ROOT + "/settings")
@@ -414,10 +430,19 @@ def save_workspace_settings(request, wsId: UUID, data: WorkspaceAISettings):
     require_permission(request, "manage_security")
     require_workspace(wsId)
     rows("SELECT pg_advisory_xact_lock(hashtextextended(%s,11))", (str(wsId),))
-    rows("""
+    rows(
+        """
         UPDATE app.workspace_settings SET allow_external_ai=%s,allow_feedback_learning=%s,
+            allow_external_media_search=coalesce(%s,allow_external_media_search),
             updated_at=clock_timestamp() WHERE workspace_id=%s
-    """, (data.allow_external_ai, data.allow_feedback_learning, wsId))
+    """,
+        (
+            data.allow_external_ai,
+            data.allow_feedback_learning,
+            data.allow_external_media_search,
+            wsId,
+        ),
+    )
     audit(request, "WORKSPACE_AI_SETTINGS_UPDATED", "WORKSPACE", wsId, workspace=wsId)
     return ack(request, identifier=wsId)
 
@@ -426,8 +451,13 @@ def save_workspace_settings(request, wsId: UUID, data: WorkspaceAISettings):
 def executions(request, wsId: UUID):
     require_permission(request, "edit_content")
     require_workspace(wsId)
-    return {"items": rows("""
+    return {
+        "items": rows(
+            """
         SELECT id,status,correlation_id,task_modality,model_id,error_category,
                created_at,completed_at
         FROM app.ai_executions WHERE workspace_id=%s ORDER BY created_at DESC,id LIMIT 100
-    """, (wsId,))}
+    """,
+            (wsId,),
+        )
+    }

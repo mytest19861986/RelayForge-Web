@@ -18,7 +18,7 @@ def outbox(cursor, tenant, workspace, event, correlation, payload):
 def freeze_publication(
     cursor, tenant, workspace, identifier, targets, *, intent, correlation, now,
     draft_id=None, draft_revision=None, route_id=None, route_revision=None, actor=None,
-    request_hash=None, source_item=None,
+    request_hash=None, source_item=None, media_asset_ids=(),
 ):
     snapshot = {
         "request_sha256": request_hash,
@@ -29,6 +29,7 @@ def freeze_publication(
             "scheduled_for": target["scheduled_for"].isoformat(),
             "catch_up": target.get("catch_up"), "draft_text": target.get("draft_text"),
             "draft_spans": target.get("draft_spans"),
+            "media": target.get("media"), "album_action": target.get("album_action"),
         } for target in targets},
     }
     cursor.execute("""
@@ -38,6 +39,11 @@ def freeze_publication(
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (identifier, tenant, workspace, draft_id, draft_revision, route_id,
           route_revision, intent, Jsonb(snapshot), actor))
+    for index, asset in enumerate(media_asset_ids):
+        cursor.execute("""
+            INSERT INTO app.media_asset_refs (id,tenant_id,media_asset_id,owner_entity_type,
+                owner_entity_id,sort_order) VALUES (%s,%s,%s,'PUBLICATION_VERSION',%s,%s)
+        """, (uuid4(), tenant, asset, identifier, index))
     task_ids = []
     for target in targets:
         task = uuid4()

@@ -92,32 +92,45 @@ class OpenAiHttpAdapter:
     def headers(self):
         return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
 
-    def request(self, path, body=None):
+    def exchange(self, path, body=None, *, max_bytes=2 * 1024 * 1024, encoded=None):
+        content = json.dumps(body).encode() if body is not None else None
+        headers = self.headers()
+        if encoded is not None:
+            encoded_headers, content = encoded
+            headers.update(encoded_headers)
         try:
             response = self.dialer.request(
-                "GET" if body is None else "POST",
+                "GET" if content is None else "POST",
                 self.origin + path,
-                headers=self.headers(),
-                content=json.dumps(body).encode() if body is not None else None,
+                headers=headers,
+                content=content,
                 follow_redirects=False,
                 allow_error_response=True,
-                max_response_bytes=2 * 1024 * 1024,
+                max_response_bytes=max_bytes,
                 timeout_sec=self.timeout_sec,
             )
         except SSRFBlockedError:
             raise AIError("FORBIDDEN") from None
         except OutboundTransportError:
-            raise AIError("TIMEOUT", spent=body is not None) from None
+            raise AIError("TIMEOUT", spent=content is not None) from None
+        if response.is_success:
+            return response
         try:
             payload = response.json()
         except ValueError:
             payload = None
-        if not response.is_success:
-            raise error_response(
-                response, payload if isinstance(payload, dict) else {}, generation=body is not None
-            )
+        raise error_response(
+            response, payload if isinstance(payload, dict) else {}, generation=content is not None
+        )
+
+    def request(self, path, body=None, *, max_bytes=2 * 1024 * 1024, encoded=None):
+        response = self.exchange(path, body, max_bytes=max_bytes, encoded=encoded)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
         if not isinstance(payload, dict):
-            raise AIError("SCHEMA_INVALID", spent=body is not None)
+            raise AIError("SCHEMA_INVALID", spent=body is not None or encoded is not None)
         return payload
 
     def discover(self):
@@ -205,7 +218,7 @@ class GeminiHttpAdapter(OpenAiHttpAdapter):
                 kinds = ["TTS"]
             elif model.startswith("imagen") or "-image" in model:
                 kinds = ["IMAGE"]
-            elif model.startswith("veo"):
+            elif model.startswith(("veo", "gemini-omni-")):
                 kinds = ["VIDEO"]
             elif isinstance(methods, list) and "generateContent" in methods:
                 kinds = (

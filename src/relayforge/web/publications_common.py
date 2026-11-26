@@ -64,12 +64,19 @@ def event(request, workspace, name, payload):
 
 
 def save_revision(tenant, draft, revision, content, title, brand, attachments):
+    identifier = uuid4()
     rows("""
         INSERT INTO app.draft_revisions (id, tenant_id, draft_id, revision_no,
             body_text, title_text, entities_ast_json, brand_identity_id, media_manifest_json)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (uuid4(), tenant, draft, revision, content.plain_text, title,
+    """, (identifier, tenant, draft, revision, content.plain_text, title,
           Jsonb([asdict(span) for span in content.spans_utf16]), brand, Jsonb(attachments)))
+    for index, asset in enumerate(attachments):
+        rows("""
+            INSERT INTO app.media_asset_refs (id, tenant_id, media_asset_id, owner_entity_type,
+                owner_entity_id, sort_order) VALUES (%s, %s, %s, 'DRAFT_REVISION', %s, %s)
+        """, (uuid4(), tenant, asset, identifier, index))
+
 
 
 def draft_record(workspace, identifier, *, lock=False):
