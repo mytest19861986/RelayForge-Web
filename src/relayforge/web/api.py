@@ -12,9 +12,20 @@ from ninja import NinjaAPI
 from ninja.errors import HttpError, ValidationError
 from ninja.security import HttpBearer, SessionAuth
 
-from relayforge.adapters.db_migrator import M1_VERSION, M2_VERSION, M3_VERSION, VERSION
+from relayforge.adapters.db_migrator import MIGRATIONS
 from relayforge.core.security import mask_secret_preview, scrub_sensitive_text
-from relayforge.web import delivery_m3, destinations_m2, drafts_m3, routes_m2, routes_m3, schemas
+from relayforge.web import (
+    ai_m4,
+    delivery_m3,
+    destinations_m2,
+    drafts_m3,
+    learning_m4,
+    routes_m2,
+    routes_m3,
+    schemas,
+    studio_m4,
+    styles_m4,
+)
 from relayforge.web.db import audit, first, lock_tenant, rows, set_context
 from relayforge.web.endpoints import ack, page, require_permission, require_workspace
 from relayforge.web.middleware import COOKIE, cookie_name, sha256
@@ -51,6 +62,10 @@ api.add_router("", destinations_m2.router)
 api.add_router("", routes_m3.router)
 api.add_router("", drafts_m3.router)
 api.add_router("", delivery_m3.router)
+api.add_router("", ai_m4.router)
+api.add_router("", studio_m4.router)
+api.add_router("", styles_m4.router)
+api.add_router("", learning_m4.router)
 
 
 @api.exception_handler(ProblemError)
@@ -119,11 +134,12 @@ def update_plan_quotas(tenant_id, daily, monthly):
 
 @api.get("/health", auth=None)
 def health(request):
+    versions = [version for version, _ in MIGRATIONS]
     count = first(
         "SELECT 1 AS connected, count(*) AS applied FROM app.schema_migrations "
-        "WHERE version IN (%s, %s, %s, %s)", (VERSION, M1_VERSION, M2_VERSION, M3_VERSION),
+        "WHERE version = ANY(%s)", (versions,),
     )
-    if count != {"connected": 1, "applied": 4}:
+    if count != {"connected": 1, "applied": len(versions)}:
         raise ProblemError(503)
     return ack(request)
 

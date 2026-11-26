@@ -28,7 +28,7 @@ def db():
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
         try:
             test_dsn = make_conninfo(dsn, dbname=name)
-            for migration_count in (1, 2, 3):
+            for migration_count in (1, 2, 3, 4):
                 with pytest.MonkeyPatch.context() as env:
                     env.setattr(db_migrator, "MIGRATIONS", db_migrator.MIGRATIONS[:migration_count])
                     assert apply_baseline_schema(test_dsn) == "APPLIED"

@@ -99,23 +99,43 @@ class SafeDialer:
 
     def request(
         self, method, url, *, headers=None, content=None, allow_error_response=False,
-        follow_redirects=True,
+        follow_redirects=True, timeout_sec=5.0, max_response_bytes=None,
     ):
         with self._transport:
             try:
                 for hop in range(4):
+                    request_headers = httpx.Headers(headers)
+                    if max_response_bytes is not None:
+                        request_headers["Accept-Encoding"] = "identity"
                     request = httpx.Request(
-                        method, url, headers=headers, content=content,
+                        method, url, headers=request_headers, content=content,
                         extensions={"timeout": dict.fromkeys(
-                            ("connect", "read", "write", "pool"), 5.0
+                            ("connect", "read", "write", "pool"), timeout_sec
                         )},
                     )
                     response = self._transport.handle_request(request)
                     try:
                         response.request = request
-                        response.read()
+                        if max_response_bytes is None:
+                            response.read()
+                        else:
+                            if response.headers.get("Content-Encoding", "identity") != "identity":
+                                raise OutboundTransportError("Unexpected encoded response")
+                            body = bytearray()
+                            chunks = (response.content,) if response.is_stream_consumed else (
+                                response.iter_raw(65536)
+                            )
+                            for chunk in chunks:
+                                if len(body) + len(chunk) > max_response_bytes:
+                                    raise OutboundTransportError("Response size limit exceeded")
+                                body.extend(chunk)
+                            bounded = httpx.Response(response.status_code,
+                                                     headers=response.headers,
+                                                     content=bytes(body), request=request)
                     finally:
                         response.close()
+                    if max_response_bytes is not None:
+                        response = bounded
                     if response.status_code not in {301, 302, 303, 307, 308}:
                         if not allow_error_response:
                             response.raise_for_status()
