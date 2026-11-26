@@ -20,7 +20,10 @@ def test_full_restore_media_destination_and_credentials(db, s3, monkeypatch, inc
     handles = [f"restore-{suffix}-{label}" for label in ("from", "to")]
     for handle in handles:
         provision(handle)
-    a, b = [login(handle) for handle in handles]
+    a, b = [
+        login(handle, REMOTE_ADDR=f"198.51.100.{index + (10 if include_secrets else 20)}")
+        for index, handle in enumerate(handles)
+    ]
     backend, _ = s3
     monkeypatch.setattr(logical_m7, "storage", lambda: backend)
     monkeypatch.setattr(ops_m6, "storage", lambda: backend)

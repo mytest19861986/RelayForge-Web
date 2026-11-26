@@ -203,7 +203,8 @@ def test_explicit_acceptance_matrix_and_studio_journey(db, tmp_path, monkeypatch
 
     for handle in ("matrix-owner", "matrix-other"):
         provision(handle)
-    a, b = login("matrix-owner"), login("matrix-other")
+    a = login("matrix-owner", REMOTE_ADDR="198.51.100.31")
+    b = login("matrix-other", REMOTE_ADDR="198.51.100.32")
     workspace, tenant = a["default_workspace_id"], a["tenant_id"]
     ui = Client().get("/app/drafts")
     assert ui.status_code == 200
