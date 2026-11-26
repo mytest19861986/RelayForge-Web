@@ -12,9 +12,9 @@ from ninja import NinjaAPI
 from ninja.errors import HttpError, ValidationError
 from ninja.security import HttpBearer, SessionAuth
 
-from relayforge.adapters.db_migrator import M1_VERSION, M2_VERSION, VERSION
+from relayforge.adapters.db_migrator import M1_VERSION, M2_VERSION, M3_VERSION, VERSION
 from relayforge.core.security import mask_secret_preview, scrub_sensitive_text
-from relayforge.web import destinations_m2, routes_m2, schemas
+from relayforge.web import delivery_m3, destinations_m2, drafts_m3, routes_m2, routes_m3, schemas
 from relayforge.web.db import audit, first, lock_tenant, rows, set_context
 from relayforge.web.endpoints import ack, page, require_permission, require_workspace
 from relayforge.web.middleware import COOKIE, cookie_name, sha256
@@ -48,6 +48,9 @@ api = NinjaAPI(
 operator_auth = OperatorBearerAuth()
 api.add_router("", routes_m2.router)
 api.add_router("", destinations_m2.router)
+api.add_router("", routes_m3.router)
+api.add_router("", drafts_m3.router)
+api.add_router("", delivery_m3.router)
 
 
 @api.exception_handler(ProblemError)
@@ -118,9 +121,9 @@ def update_plan_quotas(tenant_id, daily, monthly):
 def health(request):
     count = first(
         "SELECT 1 AS connected, count(*) AS applied FROM app.schema_migrations "
-        "WHERE version IN (%s, %s, %s)", (VERSION, M1_VERSION, M2_VERSION),
+        "WHERE version IN (%s, %s, %s, %s)", (VERSION, M1_VERSION, M2_VERSION, M3_VERSION),
     )
-    if count != {"connected": 1, "applied": 3}:
+    if count != {"connected": 1, "applied": 4}:
         raise ProblemError(503)
     return ack(request)
 

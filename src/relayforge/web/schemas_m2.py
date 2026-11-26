@@ -33,9 +33,11 @@ class DestinationInput(Schema):
     canonical_chat_id: Channel
     secret_id: UUID
     backlog_mode: Backlog = "NEW_ONLY"
+    brand_identity_id: UUID | None = None
 
 
 class DestinationPatch(Schema):
+    brand_identity_id: UUID | None = None
     display_name: Label | None = None
     backlog_mode: Backlog | None = None
     is_enabled: Annotated[bool, Field(strict=True)] | None = None

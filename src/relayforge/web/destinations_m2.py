@@ -12,6 +12,7 @@ from relayforge.web import schemas_m2 as dto
 from relayforge.web.db import audit, first, rows
 from relayforge.web.endpoints import ack, page, require_permission, require_workspace
 from relayforge.web.problems import ProblemError
+from relayforge.web.publications_common import get_brand
 from relayforge.web.routes_m2 import (
     DEST_COLUMNS,
     SECRET_KINDS,
@@ -42,6 +43,7 @@ def add_destination(request, wsId: UUID, data: dto.DestinationInput):
     require_permission(request, "manage_workspaces")
     require_workspace(wsId)
     read_secret(wsId, data.secret_id, SECRET_KINDS[data.platform])
+    get_brand(wsId, data.brand_identity_id)
     connector, profile = CONNECTORS[data.platform], PROFILES[data.platform]
     capabilities = {"native_albums": profile.native_albums,
                     "supported_spans": sorted(profile.supported_spans),
@@ -51,11 +53,12 @@ def add_destination(request, wsId: UUID, data: dto.DestinationInput):
     identifier = uuid4()
     rows("""
         INSERT INTO app.destinations (id, tenant_id, workspace_id, platform, maturity_tier,
-            canonical_chat_id, display_name, secret_id, backlog_mode, capabilities_json)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            canonical_chat_id, display_name, secret_id, backlog_mode, capabilities_json,
+             brand_identity_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (identifier, request.tenant["tenant_id"], wsId, data.platform, connector.platform_tier,
           data.canonical_chat_id, data.display_name, data.secret_id, data.backlog_mode,
-          Jsonb(capabilities)))
+          Jsonb(capabilities), data.brand_identity_id))
     audit(request, "DESTINATION_CREATED", "DESTINATION", identifier, workspace=wsId)
     return JsonResponse(ack(request, identifier=identifier), status=201)
 
@@ -64,15 +67,18 @@ def add_destination(request, wsId: UUID, data: dto.DestinationInput):
 def patch_destination(request, wsId: UUID, destId: UUID, data: dto.DestinationPatch):
     require_permission(request, "manage_workspaces")
     destination = scoped_destination(wsId, destId, for_update=True)
+    get_brand(wsId, data.brand_identity_id)
     if data.is_enabled and (data.is_archived or destination["publish_verified_at"] is None):
         raise ProblemError(409, "DESTINATION_PUBLISH_NOT_VERIFIED")
     rows("""
         UPDATE app.destinations SET display_name = COALESCE(%s, display_name),
             backlog_mode = COALESCE(%s, backlog_mode), is_archived = COALESCE(%s, is_archived),
             is_enabled = CASE WHEN %s THEN false ELSE COALESCE(%s, is_enabled) END,
+            brand_identity_id = CASE WHEN %s THEN %s ELSE brand_identity_id END,
             updated_at = clock_timestamp() WHERE id = %s
     """, (data.display_name, data.backlog_mode, data.is_archived, bool(data.is_archived),
-          data.is_enabled, destId))
+          data.is_enabled, "brand_identity_id" in data.model_fields_set,
+          data.brand_identity_id, destId))
     audit(request, "DESTINATION_UPDATED", "DESTINATION", destId, workspace=wsId)
     return ack(request, identifier=destId)
 
