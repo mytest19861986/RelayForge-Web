@@ -10,7 +10,7 @@ from relayforge.adapters.media_storage import MIMES, read_media
 from relayforge.adapters.tenant_backup import packed, sha
 from relayforge.core.media_validation import media_format
 from relayforge.web.db import first, rows
-from relayforge.web.routes_m2 import storage
+from relayforge.web.routes_m2 import SECRET_KINDS, storage
 
 PARENTS = {
     "style_revisions": ("style_profiles", "style_profile_id"),
@@ -120,7 +120,7 @@ def remap(value, identifiers):
     return value
 
 
-def apply_logical(workspace, tenant, records, media, secrets):
+def apply_logical(workspace, tenant, records, media, secrets, *, placeholder=None):
     identifiers = dict(secrets)
     for table in TABLES:
         for record in records[table]:
@@ -143,7 +143,7 @@ def apply_logical(workspace, tenant, records, media, secrets):
                 current = (
                     first(
                         """
-                    SELECT id FROM app.secrets_vault WHERE id=%s AND workspace_id=%s
+                    SELECT id,secret_kind FROM app.secrets_vault WHERE id=%s AND workspace_id=%s
                     AND NOT is_revoked
                 """,
                         (record.get("secret_id"), workspace),
@@ -161,8 +161,13 @@ def apply_logical(workspace, tenant, records, media, secrets):
                     )
                 else:
                     record["publish_verified_at"] = None
-                    if not current:
-                        raise ValueError("DESTINATION_SECRET_REQUIRED")
+                    kind = SECRET_KINDS.get(record["platform"])
+                    if kind is None:
+                        raise ValueError("INVALID_BACKUP_DESTINATION")
+                    if not current or current["secret_kind"] != kind:
+                        if placeholder is None:
+                            raise ValueError("DESTINATION_SECRET_REQUIRED")
+                        record["secret_id"] = placeholder(original["id"], kind)
             if table == "style_profiles":
                 record["analysis_id"] = None
             if table == "drafts":

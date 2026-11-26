@@ -34,6 +34,7 @@ jobs:
       - run: python scripts/gates/check_ast_gates.py
       - run: python scripts/gates/check_supply_chain.py
       - run: python scripts/gates/verify_ubuntu2404_host.py --require-ubuntu-2404
+      - run: bash scripts/gates/docker_production_smoke.sh
       - run: pytest -v tests/unit tests/integration -s
       - uses: actions/upload-artifact@v4
         with:

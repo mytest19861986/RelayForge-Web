@@ -37,6 +37,7 @@ class DestinationInput(Schema):
 
 
 class DestinationPatch(Schema):
+    secret_id: UUID | None = None
     brand_identity_id: UUID | None = None
     display_name: Label | None = None
     backlog_mode: Backlog | None = None
