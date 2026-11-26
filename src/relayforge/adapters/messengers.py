@@ -15,10 +15,11 @@ class PublishReceipt:
 
 
 class MessengerError(RuntimeError):
-    def __init__(self, category, *, retry_after_sec=None):
+    def __init__(self, category, *, retry_after_sec=None, delivery_uncertain=False):
         super().__init__(category)
         self.category = category
         self.retry_after_sec = retry_after_sec
+        self.delivery_uncertain = delivery_uncertain
 
 
 class BotPollingConflictError(MessengerError):
@@ -80,7 +81,7 @@ class TelegramBotAdapter:
                 allow_error_response=True, follow_redirects=False,
             )
         except OutboundTransportError:
-            raise MessengerError("TRANSIENT_NETWORK") from None
+            raise MessengerError("TRANSIENT_NETWORK", delivery_uncertain=True) from None
         try:
             document = response.json()
         except ValueError:
@@ -138,9 +139,9 @@ class TelegramBotAdapter:
         sent = self._call(token, "sendMessage", self._message_payload(chat_id, compiled_payload))
         identifier = sent.get("message_id") if isinstance(sent, dict) else None
         if not isinstance(identifier, (str, int)) or not str(identifier):
-            raise MessengerError("TRANSIENT_NETWORK")
+            raise MessengerError("TRANSIENT_NETWORK", delivery_uncertain=True)
         if token in str(identifier) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(identifier)):
-            raise MessengerError("TRANSIENT_NETWORK")
+            raise MessengerError("TRANSIENT_NETWORK", delivery_uncertain=True)
         return PublishReceipt(str(identifier))
 
     def test_publish(self, token, chat_id, compiled_payload, *, explicit_user_confirmation):

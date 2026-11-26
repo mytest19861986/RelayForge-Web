@@ -1,4 +1,4 @@
-name: M0, M1 and M2 gates
+name: M0 through M3 gates
 
 on: [push, pull_request]
 

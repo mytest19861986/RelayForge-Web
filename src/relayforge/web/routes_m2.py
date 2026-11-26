@@ -39,7 +39,7 @@ SECRET_KINDS = dict(zip(CONNECTORS, (
 SOURCE_PLATFORMS = {"TELEGRAM_BOT_CHANNEL": "TELEGRAM", "BALE_BOT_CHANNEL": "BALE"}
 DEST_COLUMNS = """
     id, platform, maturity_tier, canonical_chat_id, display_name, secret_id, backlog_mode,
-    is_enabled, is_archived, publish_verified_at, capabilities_json
+    is_enabled, is_archived, publish_verified_at, capabilities_json, brand_identity_id
 """
 
 
