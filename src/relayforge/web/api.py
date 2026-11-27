@@ -59,6 +59,7 @@ api = NinjaAPI(
     docs_url=None, openapi_url=None,
 )
 operator_auth = OperatorBearerAuth()
+
 api.add_router("", routes_m2.router)
 api.add_router("", destinations_m2.router)
 api.add_router("", routes_m3.router)
@@ -146,6 +147,22 @@ def health(request):
     if count != {"connected": 1, "applied": len(versions)}:
         raise ProblemError(503)
     return ack(request)
+
+
+@api.get("/operator/tenants", auth=operator_auth)
+def operator_tenants(request, limit: int = 50, cursor: UUID | None = None, q: str = ""):
+    if not 1 <= limit <= 100 or len(q) > 120:
+        raise ProblemError(422)
+    return page(rows("""
+        SELECT t.id,t.slug,t.display_name,t.status,t.created_at,
+          max(p.max_cost_micros) FILTER (WHERE p.period_kind='DAILY') AS daily_max_cost_micros,
+          max(p.max_cost_micros) FILTER (WHERE p.period_kind='MONTHLY') AS monthly_max_cost_micros
+        FROM app.tenants t LEFT JOIN app.budget_policies p
+          ON p.tenant_id=t.id AND p.policy_origin='OPERATOR_PLAN' AND p.is_active
+        WHERE (%s::uuid IS NULL OR t.id>%s)
+          AND (strpos(lower(t.slug),lower(%s))>0 OR strpos(lower(t.display_name),lower(%s))>0)
+        GROUP BY t.id ORDER BY t.id LIMIT %s
+    """, (cursor,cursor,q,q,limit+1), using=OPERATOR), limit)
 
 
 @api.post("/operator/tenants", auth=operator_auth)

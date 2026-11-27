@@ -34,6 +34,7 @@ from relayforge.web.problems import ProblemError
 from relayforge.web.publications_common import event
 from relayforge.web.routes_m2 import get_idempotency_token
 from relayforge.web.studio_m4 import _new_connection, run_attempt
+from relayforge.web.ui_lists_m8 import listing
 
 router = Router()
 ROOT = "/workspaces/{wsId}"
@@ -105,6 +106,11 @@ def _analysis(workspace, identifier):
     )
     if not item:
         raise ProblemError(404)
+    partitions = rows("""
+        SELECT sample_partition,count(*) AS total FROM app.channel_analysis_samples
+        WHERE analysis_id=%s GROUP BY sample_partition
+    """, (identifier,))
+    item["partition_counts"] = {part["sample_partition"]: part["total"] for part in partitions}
     return item
 
 
@@ -569,3 +575,9 @@ def edit_style(request, wsId: UUID, styleId: UUID, data: StylePatch):
     )
     audit(request, "STYLE_UPDATED", "STYLE", styleId, workspace=wsId)
     return ack(request, identifier=styleId, revision_no=number)
+
+
+@router.get(ROOT + "/channel-intelligence/analyses")
+def analyses(request, wsId: UUID, cursor: UUID | None = None, limit: int = 50):
+    return listing(wsId, cursor, limit, "channel_analyses",
+                   "id,target_channel_ref,status,requested_sample_count,unique_sample_count")

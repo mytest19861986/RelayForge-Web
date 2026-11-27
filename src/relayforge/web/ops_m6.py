@@ -1,6 +1,8 @@
 import csv
 import io
 import json
+import os
+import shutil
 from typing import Literal
 from uuid import UUID, uuid4, uuid5
 
@@ -30,6 +32,7 @@ from relayforge.web.logical_m7 import apply_logical, inspect_entries, logical_ex
 from relayforge.web.problems import ProblemError
 from relayforge.web.routes_m2 import credentials, get_idempotency_token, storage
 from relayforge.web.schemas_m3 import StopInput
+from relayforge.web.ui_lists_m8 import listing
 
 router = Router()
 ROOT = "/workspaces/{wsId}"
@@ -83,8 +86,31 @@ def dashboard(request, wsId: UUID):
     """,
         {"ws": wsId},
     )
+    disk = shutil.disk_usage(os.environ.get("RF_MEDIA_STAGING_ROOT", "/tmp"))
+    budget = None
+    if request.tenant["role"] in {"OWNER", "ADMIN"}:
+        budget = budgets(request, wsId)
+        budget.update(first("""
+            SELECT coalesce(sum(r.settled_micros),0)::bigint AS monthly_settled_spend_micros
+            FROM app.budget_reservation_allocations a
+            JOIN app.budget_reservations r ON r.id=a.reservation_id
+            JOIN app.budget_policies p ON p.id=a.policy_id
+            WHERE p.policy_origin='OPERATOR_PLAN' AND p.period_kind='MONTHLY'
+              AND p.is_active AND r.state='COMMITTED'
+              AND a.period_bucket=to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM')
+        """))
     return {
         **counts,
+        "disk_used_bytes": disk.used,
+        "disk_total_bytes": disk.total,
+        "disk_free_bytes": disk.free,
+        "disk_used_percent": round(disk.used / disk.total * 100, 1),
+        "pitr_retention_days": 14,
+        "recent_notifications": rows("""
+            SELECT id,title_fa,body_fa,severity,is_read,occurrence_count
+            FROM app.system_notifications WHERE workspace_id=%s
+            ORDER BY last_seen_at DESC LIMIT 6
+        """, (wsId,)),
         "disk_pressure": disk_state(),
         "engine_status": "STOPPED" if counts["emergency_stop"] else "ENABLED",
         "drafts": rows(
@@ -101,7 +127,7 @@ def dashboard(request, wsId: UUID):
         """,
             (wsId,),
         ),
-        "budgets": budgets(request, wsId) if request.tenant["role"] in {"OWNER", "ADMIN"} else None,
+        "budgets": budget,
     }
 
 
@@ -601,3 +627,23 @@ def cleanup(request, wsId: UUID):
         )
     audit(request, "OPS_CLEANUP", "WORKSPACE", wsId, workspace=wsId)
     return {"expired_exports_removed": removed, "unreferenced_assets_removed": count}
+
+
+@router.get(ROOT + "/backups")
+def backups(request, wsId: UUID, cursor: UUID | None = None, limit: int = 50):
+    require_permission(request, "manage_security")
+    require_workspace(wsId)
+    return listing(request.tenant["tenant_id"], cursor, limit, "backup_manifests",
+                   "id,backup_scope,status,byte_size,created_at", scope="tenant_id")
+
+
+@router.get(ROOT + "/backups/{manifestId}/download")
+def download_backup(request, wsId: UUID, manifestId: UUID):
+    require_permission(request, "manage_security")
+    require_workspace(wsId)
+    try:
+        bundle = stored_bundle(request.tenant["tenant_id"], manifestId)
+    except (ValueError, StorageError):
+        raise ProblemError(404) from None
+    return HttpResponse(bundle, content_type="application/octet-stream",
+                        headers={"Content-Disposition": 'attachment; filename="tenant.rfbak"'})
