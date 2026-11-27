@@ -1,15 +1,17 @@
+import io
 import os
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from ninja import File, Router, Schema, UploadedFile
+from PIL import Image
 from psycopg.types.json import Jsonb
 from pydantic import Field
 
 from relayforge.adapters.disk_pressure import disk_state
 from relayforge.adapters.media_rpc import media_rpc
-from relayforge.adapters.media_storage import put_media
+from relayforge.adapters.media_storage import put_media, read_media
 from relayforge.adapters.net_guard import OutboundTransportError, SSRFBlockedError
 from relayforge.adapters.s3_storage import StorageError
 from relayforge.adapters.stock_media import PexelsStockAdapter
@@ -22,6 +24,7 @@ from relayforge.web.db_tx import on_tenant_commit
 from relayforge.web.endpoints import require_permission, require_workspace
 from relayforge.web.problems import ProblemError
 from relayforge.web.routes_m2 import get_idempotency_token, storage
+from relayforge.web.ui_lists_m8 import listing
 
 router = Router()
 ROOT = "/workspaces/{wsId}"
@@ -364,3 +367,38 @@ def cancel(request, wsId: UUID, jobId: UUID):
 
     on_tenant_commit(request.tenant["tenant_id"], notify_worker)
     return {"id": jobId, "status": "CANCELLED"}
+
+
+@router.get(ROOT + "/media/jobs")
+def jobs(request, wsId: UUID, cursor: UUID | None = None, limit: int = 50):
+    return listing(wsId, cursor, limit, "media_jobs", "id,job_kind,status,created_at")
+
+
+@router.get(ROOT + "/podcast-scripts")
+def scripts(request, wsId: UUID, cursor: UUID | None = None, limit: int = 50):
+    return listing(wsId, cursor, limit, "podcast_scripts", "id,speaker_mode,status,created_at")
+
+@router.get(ASSET + "/{assetId}/thumbnail")
+def thumbnail(request, wsId: UUID, assetId: UUID):
+    require_workspace(wsId)
+    asset = first("""
+        SELECT s3_object_key,sha256_hex FROM app.media_assets
+        WHERE id=%s AND workspace_id=%s AND NOT is_deleted AND byte_size<=8388608
+          AND mime_type IN ('image/png','image/jpeg','image/webp','image/gif')
+    """, (assetId, wsId))
+    if not asset:
+        raise ProblemError(404)
+    safe_key = f"tenants/{request.tenant['tenant_id']}/media/{asset['sha256_hex']}"
+    if asset["s3_object_key"] != safe_key:
+        raise ProblemError(404)
+    try:
+        source = io.BytesIO(read_media(storage(), safe_key))
+        with Image.open(source, formats=("PNG", "JPEG", "WEBP", "GIF")) as picture:
+            if picture.width * picture.height > 40_000_000:
+                raise ProblemError(422)
+            picture.thumbnail((360, 240))
+            output = io.BytesIO()
+            picture.convert("RGB").save(output, format="JPEG", quality=78)
+    except (StorageError, OSError, ValueError, Image.DecompressionBombError):
+        raise ProblemError(404) from None
+    return HttpResponse(output.getvalue(), content_type="image/jpeg")

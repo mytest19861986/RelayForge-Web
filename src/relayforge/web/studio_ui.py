@@ -11,6 +11,8 @@ FILES = {
     "studio.css": "text/css",
     "studio.js": "text/javascript",
     "views.js": "text/javascript",
+    "components.js": "text/javascript",
+    "operator.js": "text/javascript",
 }
 
 
@@ -30,7 +32,7 @@ def shell(request, view=None):
             origin = f" https://{parsed.netloc}"
     response["Content-Security-Policy"] = (
         "default-src 'self'; frame-ancestors 'none'; object-src 'none'; "
-        f"base-uri 'none'; connect-src 'self'{origin}"
+        f"base-uri 'none'; img-src 'self' data: blob:; connect-src 'self'{origin}"
     )
     return response
 

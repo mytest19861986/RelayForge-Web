@@ -5,6 +5,8 @@ from relayforge.web.studio_ui import asset, shell
 
 urlpatterns = [
     path("", shell),
+    path("operator", shell),
+    path("operator/", shell),
     path("app/", shell),
     path("app/<slug:view>", shell),
     path("static/relayforge_ui/<str:filename>", asset),
