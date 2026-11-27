@@ -3,7 +3,7 @@ export const fa = value => new Intl.NumberFormat("fa-IR").format(value ?? 0);
 export const date = value => value ? new Intl.DateTimeFormat("fa-IR",{dateStyle:"medium",timeStyle:"short",timeZone:"Asia/Tehran"}).format(new Date(value)) : "—";
 export const platform = value => ({TELEGRAM:"تلگرام",BALE:"بله",EITAA:"ایتا",RUBIKA_EXPERIMENTAL:"روبیکا",SOROUSH_EXPERIMENTAL:"سروش‌پلاس"})[value] || value;
 export const state = value => ({
-  ACTIVE:"فعال", DISABLED:"غیرفعال", PENDING_DELETION:"در انتظار حذف", READY:"آماده",
+  ACTIVE:"فعال", DISABLED:"غیرفعال", STOPPED:"متوقف‌شده", RETRY_WAIT:"در انتظار تلاش دوباره", PENDING_DELETION:"در انتظار حذف", READY:"آماده",
   SCHEDULED:"زمان‌بندی‌شده", SENT:"ارسال‌شده", FAILED:"ناموفق", UNCERTAIN:"نامطمئن",
   COMPLETED:"تکمیل‌شده", PENDING:"در صف", RUNNING:"در حال اجرا", SUCCEEDED:"موفق",
   EDITING:"در حال ویرایش", APPROVED:"تأییدشده", NEEDS_REVIEW:"نیازمند بازبینی",
@@ -19,6 +19,22 @@ export function el(tag, text, className) {
   if (className) node.className = className;
   return node;
 }
+const warningStates = new Set(["UNCERTAIN", "NEEDS_REVIEW", "RETRY_WAIT", "PENDING",
+  "RUNNING", "DISABLED", "FALSE"]);
+const stoppedStates = new Set(["FAILED", "CANCELLED", "STOPPED", "PENDING_DELETION"]);
+
+export function statusPill(status) {
+  const tone = stoppedStates.has(status) ? " stopped" : warningStates.has(status) ? " warning" : "";
+  return el("span", state(status) || "—", "pill" + tone);
+}
+
+export function bytes(value) {
+  if (value == null) return "—";
+  const [power, unit] = value >= 1024 ** 3 ? [3, "گیگابایت"] :
+    value >= 1024 ** 2 ? [2, "مگابایت"] : [1, "کیلوبایت"];
+  return fa(Math.round(value / 1024 ** power * 10) / 10) + " " + unit;
+}
+
 export function ltr(value) {
   const node = el("bdi",value);
   node.dir = "ltr";
