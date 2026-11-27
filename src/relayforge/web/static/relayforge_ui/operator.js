@@ -1,4 +1,16 @@
-import {$, el, button, card, statusPill, table, fa, ltr, state, date, confirmAction} from "./components.js";
+import {
+  $,
+  el,
+  button,
+  card,
+  table,
+  fa,
+  ltr,
+  statusPill,
+  date,
+  icon,
+  confirmAction,
+} from "./components.js";
 
 export function mountOperator(status) {
   $("entry").hidden = true;
@@ -6,143 +18,248 @@ export function mountOperator(status) {
   root.hidden = false;
   let token = "";
   let renderVersion = 0;
-  const banner = el("header", null, "operator-banner");
+
+  const banner = el("div", null, "operator-banner");
+  const titleBox = el("div");
+  titleBox.append(
+    el("h1", "پنل سوپرادمین / اپراتور پلتفرم"),
+    el("p", "کنترل سطح پلتفرم، مدیریت مستأجرها و تنظیم سقف پلن OPERATOR_PLAN"),
+  );
   const home = el("a", "بازگشت به ورود استودیو");
   home.href = "/";
-  banner.append(el("h1", "پنل سوپرادمین / اپراتور پلتفرم"), home);
-  root.append(banner);
+  banner.append(titleBox, home);
+  root.replaceChildren(banner);
 
   async function api(path, method = "GET", data) {
-    const headers = {Authorization: "Bearer " + token};
+    const headers = { Authorization: "Bearer " + token };
     if (method !== "GET") {
       headers["Content-Type"] = "application/json";
       headers["Idempotency-Key"] = crypto.randomUUID();
     }
     const result = await fetch("/api/v1/operator" + path, {
-      method, headers, credentials: "omit",
+      method,
+      headers,
+      credentials: "omit",
       body: data === undefined ? undefined : JSON.stringify(data),
     });
-    if (!result.ok) throw Error((await result.json()).error?.message_fa || "درخواست اپراتور انجام نشد.");
+    if (!result.ok) {
+      let msg = "درخواست اپراتور انجام نشد.";
+      try {
+        msg = (await result.json()).error?.message_fa || msg;
+      } catch {
+        // ignore parse errors
+      }
+      throw Error(msg);
+    }
     return result.json();
   }
 
-  function form(fields, label, submit) {
-    const box = el("form");
-    for (const [name, title, type, value] of fields) {
-      const wrap = el("label", title), input = el("input");
-      input.name = name; input.type = type; input.required = true;
+  function makeForm(fields, submitLabel, onSubmit) {
+    const box = el("form", null, "form-stack");
+    for (const [name, title, type, value, placeholder] of fields) {
+      const wrap = el("label", null, "field");
+      wrap.append(el("span", title));
+      const input = el("input");
+      input.name = name;
+      input.type = type;
+      input.required = true;
       input.value = value ?? "";
+      if (placeholder) input.placeholder = placeholder;
       if (type === "password") input.autocomplete = "off";
-      if (type === "number") { input.min = "0"; input.step = "1"; }
-      wrap.append(input); box.append(wrap);
+      if (type === "number") {
+        input.min = "0";
+        input.step = "1";
+      }
+      if (type === "email" || type === "password" || name === "slug") input.dir = "ltr";
+      wrap.append(input);
+      box.append(wrap);
     }
-    const action = el("button", label);
+    const action = el("button", submitLabel, "btn-primary");
+    action.type = "submit";
     box.append(action);
     box.onsubmit = async event => {
       event.preventDefault();
       action.disabled = true;
       const value = Object.fromEntries(new FormData(box));
-      box.querySelectorAll('input[type="password"]').forEach(item => { item.value = ""; });
-      try { await submit(value); } catch (error) { status(error.message); }
-      finally { action.disabled = false; }
+      box.querySelectorAll('input[type="password"]').forEach(item => {
+        item.value = "";
+      });
+      try {
+        await onSubmit(value);
+      } catch (error) {
+        status(error.message);
+      } finally {
+        action.disabled = false;
+      }
     };
     return box;
   }
 
-  const auth = form([["token", "کلید دسترسی اپراتور", "password"]], "ورود به پنل اپراتور", async values => {
-    token = values.token;
-    try { await refresh(); } catch (error) { token = ""; throw error; }
-    login.hidden = true;
-    consolePane.hidden = false;
-  });
-  const login = card("ورود اپراتور پلتفرم", auth);
-  login.classList.add("auth");
-  const consolePane = el("div");
-  consolePane.hidden = true;
-  root.append(login, consolePane);
+  const authCard = card(
+    "ورود اپراتور پلتفرم",
+    el("p", "کلید Bearer فقط در حافظه موقت صفحه نگهداری می‌شود و هرگز در مرورگر ذخیره نمی‌گردد.", "notice info"),
+    makeForm([["token", "کلید دسترسی اپراتور (Bearer Token)", "password", "", "demo-operator-token"]], "ورود به پنل اپراتور", async values => {
+      token = values.token;
+      try {
+        await refresh();
+      } catch (error) {
+        token = "";
+        throw error;
+      }
+      authWrap.hidden = true;
+      consoleGrid.hidden = false;
+      status("ورود به پنل اپراتور با موفقیت انجام شد.");
+    }),
+  );
+  const authWrap = el("div", null, "auth-wrap");
+  authCard.style.width = "min(440px, 100%)";
+  authWrap.append(authCard);
 
+  const consoleGrid = el("div", null, "operator-grid");
+  consoleGrid.hidden = true;
+
+  const side = el("aside", null, "sidebar");
+  side.append(el("div", "اپراتور پلتفرم", "sidebar-caption"));
+  const sideNav = el("nav");
+  const listLink = el("a", null);
+  listLink.href = "#tenants";
+  listLink.setAttribute("aria-current", "page");
+  listLink.append(icon(0), document.createTextNode("مدیریت مستأجرها"));
+  const createBtnNav = el("a", null);
+  createBtnNav.href = "#create";
+  createBtnNav.append(icon(1), document.createTextNode("ایجاد مستأجر جدید"));
+  const exitLink = el("a", null);
+  exitLink.href = "#exit";
+  exitLink.append(icon(11), document.createTextNode("خروج از پنل"));
+  sideNav.append(listLink, createBtnNav, exitLink);
+  side.append(sideNav);
+
+  const centerCol = el("div", null, "stack");
   const toolbar = el("div", null, "toolbar");
   const search = el("input");
   search.type = "search";
-  search.placeholder = "جست‌وجو با نام یا نامک مستأجر";
-  search.setAttribute("aria-label", search.placeholder);
+  search.placeholder = "جست‌وجو در مستأجرها (نام یا شناسه Slug)...";
+  search.style.maxWidth = "320px";
   search.onchange = () => refresh().catch(error => status(error.message));
 
-  const creationDialog = el("dialog");
-  const create = form([
-    ["display_name", "نام سازمان", "text"],
-    ["slug", "نامک سازمان (Slug)", "text"],
-    ["owner_email", "ایمیل مالک", "email"],
-    ["owner_display_name", "نام مالک", "text"],
-    ["owner_password", "گذرواژه اولیه مالک", "password"],
-  ], "ایجاد مستأجر", async item => {
-    await api("/tenants", "POST", item);
-    creationDialog.close();
-    status("مستأجر و فضای کاری پیش‌فرض ایجاد شدند.");
-    await refresh();
-  });
-  creationDialog.append(el("h2", "ایجاد مستأجر جدید"), create, button("انصراف", () => creationDialog.close()));
+  const creationDialog = el("dialog", null, "modal-dialog");
+  const creationBody = el("div", null, "modal-body");
+  creationBody.append(
+    el("h2", "ایجاد مستأجر جدید"),
+    makeForm(
+      [
+        ["display_name", "نام سازمان / مستأجر", "text", "", "رسانه آفتاب"],
+        ["slug", "شناسه لاتین (Slug)", "text", "", "org-aftab"],
+        ["owner_email", "ایمیل مالک", "email", "", "owner@company.ir"],
+        ["owner_display_name", "نام کامل مالک", "text", "", "مهدی رحمانی"],
+        ["owner_password", "گذرواژه اولیه (حداقل ۱۲ کاراکتر)", "password", "", "••••••••••••"],
+      ],
+      "ایجاد مستأجر و فضای کاری",
+      async item => {
+        await api("/tenants", "POST", item);
+        creationDialog.close();
+        status("مستأجر جدید و فضای کاری پیش‌فرض با موفقیت ایجاد شدند.");
+        await refresh();
+      },
+    ),
+    button("بستن", () => creationDialog.close(), "btn-outline"),
+  );
+  creationDialog.append(creationBody);
+
+  createBtnNav.onclick = e => {
+    e.preventDefault();
+    creationDialog.showModal();
+  };
+  listLink.onclick = e => {
+    e.preventDefault();
+    refresh().catch(err => status(err.message));
+  };
+  exitLink.onclick = e => {
+    e.preventDefault();
+    token = "";
+    renderVersion++;
+    consoleGrid.hidden = true;
+    tableHost.replaceChildren();
+    quotaHost.replaceChildren();
+    authWrap.hidden = false;
+  };
 
   toolbar.append(
+    button("+ ایجاد مستأجر جدید", () => creationDialog.showModal(), "btn-primary"),
     search,
-    button("+ ایجاد مستأجر جدید", () => creationDialog.showModal(), ""),
-    button("خروج", () => {
-      token = ""; renderVersion++; consolePane.hidden = true;
-      list.replaceChildren(); editor.replaceChildren(); login.hidden = false;
-    }),
+    button("بروزرسانی", () => refresh().catch(err => status(err.message)), "btn-outline"),
   );
 
-  const grid = el("div", null, "operator-grid");
-  const sideCard = card(
-    "سقف پلن اپراتور",
-    el("span", "OPERATOR_PLAN", "pill"),
-    el("p", "سیاست نگهداری فیزیکی PITR: ۱۴ روز"),
-    el("p", "تغییر سقف پلن هر مستأجر از ستون عملیات در جدول مستأجرها انجام می‌شود."),
-  );
-  const editor = el("div");
-  const leftCol = el("div");
-  leftCol.append(sideCard, editor);
+  const tableHost = el("div");
+  centerCol.append(card("مدیریت مستأجرها (Tenants)", toolbar, tableHost));
 
-  const list = el("div");
-  const mainCard = card("مدیریت مستأجرها (Tenants)", toolbar, list);
-  grid.append(leftCol, mainCard);
-  consolePane.append(grid, creationDialog);
+  const quotaHost = el("div", null, "stack");
+  function renderDefaultQuota() {
+    quotaHost.replaceChildren(
+      card(
+        "سقف پلن اپراتور (OPERATOR_PLAN)",
+        el("span", "قفل‌شده در دیتابیس (RF007)", "pill"),
+        el("p", "برای ویرایش سقف روزانه و ماهانه هر سازمان، روی دکمه «ویرایش سقف» در جدول کلیک کنید.", "empty"),
+        el("div", "بازه نگهداری فیزیکی PITR: ۱۴ روز", "notice"),
+      ),
+    );
+  }
+  renderDefaultQuota();
 
-  function quota(item) {
-    editor.replaceChildren(card("سقف طرح · " + item.display_name, form([
-      ["daily_max_cost_micros", "سقف روزانه (میکرو)", "number", item.daily_max_cost_micros],
-      ["monthly_max_cost_micros", "سقف ماهانه (میکرو)", "number", item.monthly_max_cost_micros],
-    ], "ذخیره سقف طرح", async value => {
-      if (!await confirmAction("به‌روزرسانی سقف طرح", item.display_name)) return;
-      await api("/tenants/" + encodeURIComponent(item.id) + "/plan-quotas", "PUT", {
-        daily_max_cost_micros: Number(value.daily_max_cost_micros),
-        monthly_max_cost_micros: Number(value.monthly_max_cost_micros),
-      });
-      status("سقف طرح به‌روز شد.");
-      await refresh();
-    })));
-    editor.scrollIntoView({block: "nearest"});
+  function openQuotaEditor(item) {
+    quotaHost.replaceChildren(
+      card(
+        "ویرایش سقف پلن · " + item.display_name,
+        el("span", "OPERATOR_PLAN", "pill"),
+        makeForm(
+          [
+            ["daily_max_cost_micros", "سقف روزانه AI (میکرو-دلار)", "number", item.daily_max_cost_micros],
+            ["monthly_max_cost_micros", "سقف ماهانه AI (میکرو-دلار)", "number", item.monthly_max_cost_micros],
+          ],
+          "ذخیره سقف پلن",
+          async value => {
+            if (!(await confirmAction("به‌روزرسانی سقف پلن", item.display_name))) return;
+            await api("/tenants/" + encodeURIComponent(item.id) + "/plan-quotas", "PUT", {
+              daily_max_cost_micros: Number(value.daily_max_cost_micros),
+              monthly_max_cost_micros: Number(value.monthly_max_cost_micros),
+            });
+            status("سقف پلن اپراتور با موفقیت ذخیره شد.");
+            await refresh();
+          },
+        ),
+        el("div", "بازه نگهداری فیزیکی PITR: ۱۴ روز", "notice"),
+      ),
+    );
   }
 
   async function refresh(cursor = "") {
     const generation = ++renderVersion;
-    const response = await api("/tenants?" + new URLSearchParams({q: search.value, ...(cursor ? {cursor} : {})}));
+    const response = await api(
+      "/tenants?" + new URLSearchParams({ q: search.value, ...(cursor ? { cursor } : {}) }),
+    );
     if (generation !== renderVersion) return;
-    const rows = response.items;
-    list.replaceChildren(table([
-      ["نام مستأجر", "display_name"],
-      ["نامک", item => ltr(item.slug)],
-      ["وضعیت", item => statusPill(item.status)],
-      ["تاریخ ساخت", item => date(item.created_at)],
-      ["سقف روزانه", item => fa(item.daily_max_cost_micros)],
-      ["سقف ماهانه", item => fa(item.monthly_max_cost_micros)],
-      ["عملیات", item => button("ویرایش سقف", () => quota(item))],
-    ], rows));
+    const rows = response.items || [];
+    tableHost.replaceChildren(
+      table(
+        [
+          ["نام مستأجر", "display_name"],
+          ["شناسه (Slug)", item => ltr(item.slug)],
+          ["وضعیت", item => statusPill(item.status)],
+          ["تاریخ ایجاد", item => date(item.created_at)],
+          ["سقف روزانه", item => fa(item.daily_max_cost_micros)],
+          ["سقف ماهانه", item => fa(item.monthly_max_cost_micros)],
+          ["عملیات", item => button("ویرایش سقف", () => openQuotaEditor(item), "btn-outline btn-sm")],
+        ],
+        rows,
+      ),
+    );
     if (response.page_info?.next_cursor) {
-      list.append(button("صفحه بعد", () => refresh(response.page_info.next_cursor).catch(error => status(error.message))));
-    }
-    if (cursor) {
-      list.append(button("صفحه اول", () => refresh().catch(error => status(error.message))));
+      tableHost.append(
+        button("صفحه بعد", () => refresh(response.page_info.next_cursor).catch(e => status(e.message)), "btn-outline btn-sm"),
+      );
     }
   }
+
+  consoleGrid.append(side, centerCol, quotaHost);
+  root.append(authWrap, consoleGrid, creationDialog);
 }

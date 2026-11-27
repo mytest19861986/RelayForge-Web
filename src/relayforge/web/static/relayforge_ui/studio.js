@@ -1,606 +1,1341 @@
-import {views, actions} from "./views.js";
-import {mountOperator} from "./operator.js";
-import {$, el, fa, ltr, date, platform, state, bytes, statusPill, icon, card, button, table, setOptions, confirmAction, download} from "./components.js";
+import { views } from "./views.js";
+import { mountOperator } from "./operator.js";
+import {
+  $,
+  el,
+  fa,
+  ltr,
+  date,
+  platform,
+  state,
+  statusPill,
+  maturityBadge,
+  bytes,
+  icon,
+  card,
+  meter,
+  button,
+  table,
+  setOptions,
+  confirmAction,
+  download,
+} from "./components.js";
 
-let csrf="", workspace="", current="", eventCursor="", toast, generation=0, refreshPane, mediaTab="";
+const SUBTITLES = {
+  dashboard: "وضعیت کلی سامانه، مصرف منابع، بودجه و رویدادهای مهم",
+  sources: "مدیریت منابع محتوا و واردسازی آرشیو کانال‌ها به S3",
+  destinations: "مدیریت مقصدهای انتشار، رده بلوغ و تست فنی/آزمایشی",
+  routes: "تعریف مسیرهای پردازش ۴ حالته، فیلترها و شبیه‌ساز Dry-Run",
+  content: "تولید، بازنویسی و بهینه‌سازی محتوا با ۴ حالت آزادی و گارد صحت حقایق",
+  intelligence: "تحلیل آماری ۸۰/۲۰ محتوای کانال و استخراج هویت بدون هویت ثالث",
+  styles: "مدیریت سبک‌های نگارش، نسخه‌بندی و ترکیب وزنی دو الگو",
+  media: "کتابخانه رسانه، جستجوی مجوزدار، اینفوگرافیک فارسی، استیکر، کلیپ و پادکست",
+  ai: "مدیریت ارائه‌دهندگان BYOK، رضایت‌نامه‌های خارجی، آزمون مدل و بودجه",
+  drafts: "ویرایش پیش‌نویس، پیش‌نمایش تفکیک‌شده پیام‌رسان‌ها و انتشار با تأیید صریح",
+  delivery: "پایش صف تحویل و میز کار اختصاصی تعیین تکلیف موارد UNCERTAIN",
+  operations: "دفتر ممیزی تغییرناپذیر، گزارش CSV/JSON، پاکسازی و پشتیبان رمزگذاری‌شده",
+};
+
+let csrf = "";
+let workspace = "";
+let current = "";
+let eventCursor = "";
+let toastTimer;
+let generation = 0;
+
 function status(text) {
-  $("status").textContent=text; $("status").hidden=!text;
-  clearTimeout(toast); toast=setTimeout(()=>$("status").hidden=true,4500);
+  const box = $("status");
+  box.textContent = text;
+  box.hidden = !text;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    box.hidden = true;
+  }, 4500);
 }
-async function request(path,method="GET",body) {
-  const headers={};
-  if (method!=="GET") {
-    if (!(body instanceof FormData)) headers["Content-Type"]="application/json";
-    headers["Idempotency-Key"]=crypto.randomUUID();
-    if(csrf) headers["X-CSRFToken"]=csrf;
+
+async function request(path, method = "GET", body) {
+  const headers = {};
+  if (method !== "GET") {
+    if (!(body instanceof FormData)) headers["Content-Type"] = "application/json";
+    headers["Idempotency-Key"] = crypto.randomUUID();
+    if (csrf) headers["X-CSRFToken"] = csrf;
   }
-  const response=await fetch("/api/v1"+path,{method,headers,credentials:"same-origin",
-    body:body instanceof FormData || body===undefined ? body : JSON.stringify(body)});
-  const value=response.headers.get("content-type")?.includes("json") ? await response.json() : await response.text();
-  if(!response.ok) throw Error(value.error?.message_fa || "درخواست انجام نشد.");
+  const response = await fetch("/api/v1" + path, {
+    method,
+    headers,
+    credentials: "same-origin",
+    body: body instanceof FormData || body === undefined ? body : JSON.stringify(body),
+  });
+  const isJson = response.headers.get("content-type")?.includes("json");
+  const value = isJson ? await response.json() : await response.text();
+  if (!response.ok) throw Error(value?.error?.message_fa || "درخواست انجام نشد.");
   return value;
 }
-const scoped = path => "/workspaces/"+encodeURIComponent(workspace)+path;
+
+const scoped = path => "/workspaces/" + encodeURIComponent(workspace) + path;
 const query = path => request(scoped(path));
-const attempt = fn => async (...args) => {try{await fn(...args);}catch(error){status(error.message);}};
-async function items(path) {
-  const url=scoped(path), records=[];
-  let cursor="";
-  do {
-    const data=await request(url+(url.includes("?")?"&":"?")+new URLSearchParams({limit:100,...(cursor?{cursor}:{})}));
-    records.push(...(data.items||[]));
-    cursor=data.page_info?.next_cursor || data.next_cursor;
-  } while(cursor);
-  return records;
-}
-const label = (item,index) => item.display_name || item.display_title || item.title || item.title_text ||
-  item.name || item.label || item.target_channel_ref || item.canonical_chat_id ||
-  (item.model_id ? item.model_id : [state(item.job_kind||item.media_kind||item.backup_scope||item.speaker_mode||item.status),
-    item.created_at ? date(item.created_at) : fa(index+1)].filter(Boolean).join(" · "));
-const collections={
-  source_ids:"/sources",source_id:"/sources",destination_ids:"/destinations",secret_id:"/security/secrets",
-  manual_provider_id:"/ai/providers",provider_id:"/ai/providers",style_profile_id:"/styles",first:"/styles",
-  second:"/styles",asset_ids:"/media/assets",assets:"/media/assets",podcast_script_id:"/podcast-scripts",
-  brand_identity_id:"/brands",manifest_id:"/backups",
-};
-function pickerPath(name,path) {
-  if(name!=="id") return collections[name];
-  for(const endpoint of ["/channel-intelligence/analyses","/security/secrets","/media/jobs","/destinations","/routes","/styles","/drafts","/deliveries"]) {
-    if(path.startsWith(endpoint+"/")) return endpoint;
+const safe = fn => async (...args) => {
+  try {
+    await fn(...args);
+  } catch (err) {
+    status(err.message);
   }
+};
+
+async function fetchList(path) {
+  const res = await query(path + (path.includes("?") ? "&" : "?") + "limit=100");
+  return res.items || [];
 }
-const formatStatus = row => statusPill(row.status || row.approval_state || row.is_enabled?.toString().toUpperCase());
-const yesno = value => value ? "فعال" : "غیرفعال";
-function meter(value,max) {
-  const bar=el("progress"); bar.max=Math.max(1,max||0); bar.value=value||0;
-  bar.setAttribute("aria-label","پیشرفت"); return bar;
+
+const itemLabel = (item, idx = 0) =>
+  item.display_name ||
+  item.display_title ||
+  item.title ||
+  item.title_text ||
+  item.name ||
+  item.label ||
+  item.target_channel_ref ||
+  item.canonical_chat_id ||
+  item.model_id ||
+  [state(item.job_kind || item.media_kind || item.backup_scope || item.status), fa(idx + 1)]
+    .filter(Boolean)
+    .join(" · ");
+
+function syncTopbar(dash) {
+  const pill = $("engine");
+  $("engine-label").textContent = dash.emergency_stop ? "موتور: متوقف‌شده" : "موتور: در حال اجرا";
+  pill.classList.toggle("stopped", Boolean(dash.emergency_stop));
+  $("unread").textContent = fa(dash.unread || 0);
+  $("stop").disabled = Boolean(dash.emergency_stop);
 }
-function notices(list) {
-  if(!list?.length) return el("p","اعلان جدیدی وجود ندارد.","empty");
-  const group=el("div");
+
+function renderAlertsList(list, onRefresh) {
+  if (!list?.length) return el("p", "اعلان جدیدی وجود ندارد.", "empty");
+  const wrap = el("div", null, "alert-list");
   for (const item of list) {
-    const toolbar = el("div", null, "toolbar notification-actions");
-    toolbar.append(el("span", fa(item.occurrence_count) + " بار", "pill"));
+    const row = el("div", null, "alert-item");
+    const body = el("div");
+    body.append(el("strong", item.title_fa), el("p", item.body_fa));
+    const right = el("div", null, "toolbar");
+    right.append(el("span", fa(item.occurrence_count) + " بار", item.severity === "WARNING" ? "pill warning" : "pill"));
     if (!item.is_read) {
-      toolbar.append(button("خواندم", attempt(async () => {
-        await request(scoped("/notifications/" + item.id + "/read"), "POST", {});
-        await refreshDashboard();
-        if (!$("notifications").hidden) await openNotifications();
-      })));
+      right.append(
+        button(
+          "خواندم",
+          safe(async () => {
+            await request(scoped("/notifications/" + item.id + "/read"), "POST", {});
+            await onRefresh();
+          }),
+          "btn-outline btn-sm",
+        ),
+      );
     }
-    group.append(card(item.title_fa, el("p", item.body_fa), toolbar));
+    row.append(body, right);
+    wrap.append(row);
   }
-  return group;
+  return wrap;
 }
-async function openNotifications() {
-  const pane=$("notifications"), activeWorkspace=workspace, notificationItems=await items("/notifications");
-  if(activeWorkspace!==workspace) return;
-  pane.replaceChildren(el("h2","اعلان‌ها"),notices(notificationItems));
+
+/* ================= VIEW 1: DASHBOARD ================= */
+async function renderDashboard(mount, stamp) {
+  const data = await query("/dashboard");
+  if (stamp !== generation) return;
+  syncTopbar(data);
+
+  const kpis = [
+    ["منابع فعال", data.sources, "فعال در فضا", "blue", 1],
+    ["مقصدها", data.destinations, "کانال‌های ثبت‌شده", "emerald", 2],
+    ["مسیرهای فعال", data.routes, "در حال اجرا", "purple", 3],
+    ["اعلان‌های خوانده‌نشده", data.unread, data.unread ? "نیازمند توجه" : "همه خوانده‌شده", "crimson", 12],
+    ["کارهای رسانه‌ای", data.active_media_jobs, "در صف پردازش", "amber", 7],
+  ];
+  const kpiGrid = el("div", null, "kpi-grid");
+  for (const [title, val, sub, color, ic] of kpis) {
+    const tile = el("article", null, "kpi-card");
+    const badge = el("div", null, "kpi-icon " + color);
+    badge.append(icon(ic));
+    tile.append(
+      badge,
+      el("div", title, "kpi-title"),
+      el("div", fa(val), "kpi-value"),
+      el("div", sub, "kpi-sub" + (color === "crimson" && val > 0 ? " danger-text" : "")),
+    );
+    kpiGrid.append(tile);
+  }
+
+  const plan = data.budgets?.policies?.find(
+    p => p.policy_origin === "OPERATOR_PLAN" && p.period_kind === "MONTHLY",
+  );
+  const monthlySpend = data.budgets?.monthly_settled_spend_micros ?? data.budgets?.settled_spend_micros ?? 0;
+  const maxCost = plan?.max_cost_micros || 0;
+  const pct = maxCost ? Math.min(100, Math.round((monthlySpend / maxCost) * 100)) : 0;
+
+  const budgetCard = card(
+    "بودجه مستأجر",
+    el("div", null, "meter-meta"),
+    meter(monthlySpend, maxCost || 1, pct >= 75 ? "amber" : ""),
+    el("p", "مصرف ثبت‌شده: " + fa(monthlySpend) + " میکرو-دلار", "view-subtitle"),
+    el("p", plan ? "سقف پلن اپراتور (فقط خواندنی): " + fa(maxCost) + " میکرو" : "سقف پلن ثبت نشده است.", "pill"),
+  );
+  budgetCard.querySelector(".meter-meta").append(
+    el("span", "نسبت مصرف ماهانه"),
+    el("strong", fa(pct) + "٪"),
+  );
+
+  const alertsCard = card(
+    "اعلان‌های مهم",
+    renderAlertsList(data.recent_notifications, () => show("dashboard")),
+  );
+
+  const diskCard = card(
+    "وضعیت دیسک",
+    el("div", null, "meter-meta"),
+    meter(data.disk_used_percent || 0, 100, (data.disk_used_percent || 0) >= 85 ? "amber" : ""),
+    el("p", bytes(data.disk_used_bytes) + " مصرف‌شده از " + bytes(data.disk_total_bytes), "view-subtitle"),
+    el("p", "فضای آزاد: " + bytes(data.disk_free_bytes), "view-subtitle"),
+    el("span", "سیاست نگهداری: " + fa(data.pitr_retention_days || 14) + " روز (PITR)", "pill"),
+  );
+  diskCard.querySelector(".meter-meta").append(
+    el("span", "ظرفیت استفاده‌شده"),
+    el("strong", fa(data.disk_used_percent || 0) + "٪"),
+  );
+
+  const bottom = el("div", null, "grid-3");
+  bottom.append(budgetCard, alertsCard, diskCard);
+  mount.replaceChildren(kpiGrid, bottom);
 }
-function syncDashboard(value) {
-  $("engine").textContent=value.emergency_stop?"موتور · متوقف‌شده":"موتور · در حال اجرا";
-  $("engine").classList.toggle("stopped",value.emergency_stop);
-  $("unread").textContent=fa(value.unread);
-  $("stop").disabled=value.emergency_stop;
-}
-async function refreshDashboard() {
-  const key=workspace,value=await query("/dashboard");
-  if(workspace!==key) return;
-  syncDashboard(value);
-  if(current==="dashboard") render(value,"/dashboard");
-}
-function dashboard(value) {
-  syncDashboard(value);
-  const metrics=el("div",null,"metrics");
-  Object.entries({sources:"منابع فعال",destinations:"مقصدها",routes:"مسیرهای فعال",
-    unread:"اعلان‌های خوانده‌نشده",active_media_jobs:"کارهای رسانه"}).forEach(([key,name],index)=>{
-    const tile=card(null,icon(index),el("strong",fa(value[key])),el("span",name));
-    tile.classList.add("metric"); metrics.append(tile);
+
+/* ================= VIEW 2: SOURCES ================= */
+async function renderSources(mount, stamp) {
+  const list = await fetchList("/sources");
+  if (stamp !== generation) return;
+
+  const search = el("input");
+  search.type = "search";
+  search.placeholder = "جست‌وجو در منابع...";
+  const tblHost = el("div");
+  const draw = (q = "") => {
+    const filtered = list.filter(s =>
+      (s.display_title + " " + s.canonical_channel_id).toLowerCase().includes(q.toLowerCase()),
+    );
+    tblHost.replaceChildren(
+      table(
+        [
+          ["نام منبع", "display_title"],
+          ["شناسه کانال", r => ltr(r.canonical_channel_id)],
+          ["نوع", r => ltr(r.source_kind)],
+          ["وضعیت", r => statusPill(r.is_active ? "ACTIVE" : "DISABLED")],
+        ],
+        filtered,
+      ),
+    );
+  };
+  search.oninput = () => draw(search.value);
+  draw();
+
+  const addForm = el("form", null, "form-stack");
+  const kindSel = el("select");
+  kindSel.name = "source_kind";
+  kindSel.add(new Option("وب‌هوک ربات تلگرام (WEBHOOK_INBOUND)", "WEBHOOK_INBOUND"));
+  kindSel.add(new Option("آرشیو تلگرام دسکتاپ (TELEGRAM_DESKTOP_EXPORT)", "TELEGRAM_DESKTOP_EXPORT"));
+  const titleIn = el("input");
+  titleIn.name = "display_title";
+  titleIn.required = true;
+  titleIn.placeholder = "خبرگزاری آفتاب";
+  const chanIn = el("input");
+  chanIn.name = "canonical_channel_id";
+  chanIn.required = true;
+  chanIn.dir = "ltr";
+  chanIn.placeholder = "@tech_news_ir";
+  const addBtn = el("button", "افزودن منبع", "btn-primary");
+  addBtn.type = "submit";
+  addForm.append(
+    wrapField("نوع منبع", kindSel),
+    wrapField("نام منبع", titleIn),
+    wrapField("شناسه کانال", chanIn),
+    addBtn,
+  );
+  addForm.onsubmit = safe(async e => {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(addForm));
+    if (d.source_kind === "WEBHOOK_INBOUND") d.webhook_platform = "telegram";
+    await request(scoped("/sources"), "POST", d);
+    status("منبع جدید با موفقیت ثبت شد.");
+    await show("sources");
   });
-  const plan=value.budgets?.policies?.find(item=>item.policy_origin==="OPERATOR_PLAN"&&item.period_kind==="MONTHLY");
-  const spend=value.budgets?.settled_spend_micros||0;
-  const columns=el("div",null,"cards");
-  columns.append(card("بودجه مستأجر",
-    el("p",plan ? "سقف ماهانه طرح: "+fa(plan.max_cost_micros)+" میکرو":"سقف طرح در دسترس نیست."),
-    el("p","مجموع هزینه ثبت‌شده: "+fa(spend)+" میکرو"),
-    ...(plan&&value.budgets.monthly_settled_spend_micros!=null?[meter(value.budgets.monthly_settled_spend_micros,plan.max_cost_micros)]:[])),
-    card("اعلان‌های مهم",notices(value.recent_notifications)),
-    card("وضعیت دیسک",meter(value.disk_used_percent,100),
-      el("p",fa(value.disk_used_percent)+"٪ استفاده · "+bytes(value.disk_free_bytes)+" آزاد"),
-      el("p",bytes(value.disk_used_bytes)+" از "+bytes(value.disk_total_bytes)),
-      el("span","نگهداری فیزیکی PITR · "+fa(value.pitr_retention_days)+" روز","pill")));
-  const node=el("div");node.append(metrics,columns);return node;
-}
-const listColumns={
-  "/sources":[["منبع","display_title"],["کانال",row=>ltr(row.canonical_channel_id)],["نوع",row=>ltr(row.source_kind)],["وضعیت",row=>yesno(row.is_active)]],
-  "/destinations":[["مقصد","display_name"],["کانال",row=>ltr(row.canonical_chat_id)],["پیام‌رسان",row=>platform(row.platform)],
-    ["رده",row=>el("span",row.platform==="EITAA"?"فقط ارسال خروجی":row.platform.endsWith("_EXPERIMENTAL")?"آزمایشی — نیازمند تست زنده":"فعال GA","pill "+(row.platform.endsWith("_EXPERIMENTAL")?"warning":""))],
-    ["آلبوم بومی",row=>row.capabilities_json?.native_albums?"دارد":"—"],["وضعیت",row=>yesno(row.is_enabled)]],
-  "/routes":[["مسیر","display_name"],["حالت",row=>ltr(row.route_mode)],["سطح",row=>state(row.automation_level)],
-    ["عملیات",row=>button(row.is_enabled?"غیرفعال کردن":"فعال کردن",attempt(async()=>{
-      await request(scoped("/routes/"+row.id),"PATCH",{is_enabled:!row.is_enabled}); await refreshPane();
-    }))]],
-  "/styles":[["الگو",row=>label(row,0)],["نسخه",row=>fa(row.pinned_revision_no)],["دسته","content_category"]],
-  "/drafts":[["پیش‌نویس",row=>label(row,0)],["بازبینی",row=>fa(row.current_revision_no)],["وضعیت",formatStatus]],
-  "/deliveries":[["وضعیت",formatStatus],["زمان",row=>date(row.scheduled_for)],["تلاش",row=>fa(row.attempts)],
-    ["نتیجه",row=>row.last_error_safe||"—"],["عملیات",row=>row.status==="UNCERTAIN"?button("تعیین تکلیف",()=>{
-      const form=$("actions").querySelector('[data-reconcile]');
-      form.elements.id.value=row.id;form.scrollIntoView({block:"start"});
-    }):"—"]],
-  "/media/assets":[["نوع","media_kind"],["خاستگاه","origin_kind"],["حجم",row=>bytes(row.byte_size)],["وضعیت",formatStatus]],
-  "/media/jobs":[["نوع","job_kind"],["وضعیت",formatStatus],["زمان",row=>date(row.created_at)]],
-  "/ai/providers":[["ارائه‌دهنده","display_name"],["نوع",row=>ltr(row.provider_type)],["وضعیت",row=>yesno(row.is_enabled)]],
-  "/security/consents":[["دامنه",row=>ltr(row.provider_scope)],["رضایت",row=>row.is_granted?"مجاز":"لغوشده"],["زمان",row=>date(row.updated_at)]],
-  "/security/secrets":[["عنوان","label"],["نوع","secret_kind"],["نمای کلید",row=>ltr(row.masked_hint)]],
-  "/backups":[["دامنه",row=>state(row.backup_scope)],["زمان",row=>date(row.created_at)],["حجم",row=>bytes(row.byte_size)],["فایل",row=>backupLink(row.id)]],
-  "/audit-events":[["عملیات","action_code"],["نقش","actor_role"],["زمان",row=>date(row.created_at)]],
-  "/reports/ai-usage":[["مدل",row=>ltr(row.model_id)],["قابلیت","task_modality"],["هزینه",row=>fa(row.cost_micros)],["اجرا",row=>fa(row.executions)]],
-  "/channel-intelligence/analyses":[["کانال",row=>ltr(row.target_channel_ref)],["نمونه",row=>fa(row.unique_sample_count)],["وضعیت",formatStatus]],
-};
-function collection(endpoint,records) {
-  const node=el("div");
-  const columns=listColumns[endpoint]||[["رسانه",row=>row.photographer||row.author||row.title||label(row,0)],["وضعیت",formatStatus]];
-  const search=el("input"); search.type="search"; search.placeholder="جست‌وجو در فهرست";
-  search.setAttribute("aria-label",search.placeholder);
-  const target=el("div");
-  function show(query=""){
-    const found=records.filter(row=>Object.values(row).some(value=>typeof value==="string"&&value.toLowerCase().includes(query.toLowerCase())));
-    if(endpoint==="/styles"){
-      const cards=el("div",null,"cards");
-      found.forEach((row,index)=>cards.append(card(label(row,index),
-        el("p","نسخه "+fa(row.pinned_revision_no),"pill"),el("p",row.content_category))));
-      target.replaceChildren(found.length?cards:el("p","الگویی یافت نشد.","empty"));
-    } else target.replaceChildren(table(columns,found));
-  }
-  search.oninput=()=>show(search.value); node.append(search,target); show();return node;
-}
-function facts(items) {
-  const list=el("ul");
-  for(const entry of items||[]) list.append(el("li",Array.isArray(entry)?entry.join(" · "):entry));
-  return list;
-}
-function contentComparison(data,input) {
-  const grid=el("div",null,"comparison");
-  grid.append(card("متن ورودی",el("p",input||"—","bubble")));
-  for(const result of data.candidates) {
-    const diff=result.fact_diff_json||{}, blocked=result.fact_guard_verdict==="FACT_MISMATCH_BLOCKED";
-    grid.append(card("خروجی پیشنهادی",el("p",result.text,"bubble"),el("h3","گارد صحت حقایق"),
-      el("p",blocked?"مغایرت مسدود شد":result.fact_guard_verdict==="NOT_APPLICABLE_UNRESTRICTED"?"بررسی غیرفعال است":"مغایرت مسدودکننده یافت نشد",blocked?"notice":"pill"),
-      el("p","حذف‌شده · "+fa(diff.missing?.length||0)),facts(diff.missing),
-      el("p","افزوده‌شده · "+fa(diff.introduced?.length||0)),facts(diff.introduced),
-      ...(diff.sensitive_claim_flagged?[el("p","ادعای حساس نیازمند بازبینی است.","notice")]:[])));
-  }
-  return grid;
-}
-function previews(rows, actionsData) {
-  const grid=el("div",null,"cards");
-  for(const row of rows) {
-    const target=actionsData?.find(item=>item.id===row.destination_id);
-    const payload=row.rendered_payload||row.payload||row.formatting?.payload||{};
-    const warnings=row.degradations||row.formatting?.degradations||[];
-    grid.append(card(target?platform(target.platform)+" · "+target.display_name:(row.platform?platform(row.platform):"مقصد"),
-      el("p",payload.plain_text||payload.text||row.filter_reason||"پیش‌نمایش متنی موجود نیست.","bubble"),
-      ...warnings.map(message=>el("p",state(message),"notice"))));
-  }
-  return grid;
-}
-function reportAnalysis(data) {
-  const stats=data.statistical_summary_json||{}, panel=el("div",null,"cards");
-  const split=stats.split||{};
-  const train=data.partition_counts?.EXTRACTION ?? stats.extraction_count ?? split.extraction_count;
-  const evaluate=data.partition_counts?.EVALUATION ?? stats.evaluation_count ?? split.evaluation_count;
-  const counts=table([["شاخص","title"],["تعداد",row=>fa(row.value)]],[
-    {title:"درخواستی",value:data.requested_sample_count??stats.requested_sample_count},
-    {title:"یکتا",value:data.unique_sample_count??stats.unique_sample_count},
-    {title:"استخراج",value:train},{title:"ارزیابی",value:evaluate}]);
-  panel.append(card("نمونه‌گیری و تفکیک ۸۰/۲۰",el("div",null,"donut"),counts));
-  const identity=data.extracted_identity_json||{};
-  panel.append(card("هویت استخراج‌شده",facts(Object.values(identity).flat().filter(value=>typeof value==="string")),
-    el("p","هویت کانال ثالث به‌طور پیش‌فرض حذف می‌شود.","notice")));
-  const topics=Object.entries(stats.clusters||{});
-  if(topics.length){
-    panel.append(card("موضوعات نمونه",...topics.map(([title,count])=>card(title,
-      meter(count, data.unique_sample_count||100),el("span",fa(count)+" نمونه")))));
-  }
-  return panel;
-}
-function render(value,path="",input="",targets=[],mount=$("results")) {
-  const base=path.split("?")[0];
-  let node;
-  if(base==="/dashboard") node=dashboard(value);
-  else if(value?.candidates) node=contentComparison(value,input);
-  else if(value?.statistical_summary_json) node=reportAnalysis(value);
-  else if(value?.before?.text!==undefined&&value?.after?.text!==undefined){
-    node=el("div",null,"comparison");
-    node.append(card("متن نمونه",el("p",value.before.text,"bubble")),
-      card("آزمایش سبک",el("p",value.after.text,"bubble")));
-  }
-  else if(value?.destinations) {
-    node=el("div");
-    if(path.endsWith("/dry-run")){
-      const steps=el("ol",null,"steps");
-      ["انتخاب محتوا","اعمال قوانین","پیش‌نمایش","گزارش نتیجه"].forEach((step,index)=>{
-        const line=el("li",null,"card");line.append(el("span",fa(index+1),"pill"),el("strong",step));steps.append(line);
-      });
-      node.append(steps,el("p",state(value.decision||"")));
-    }
-    else node.append(el("p","پیش‌نمایش وب جایگزین نمایش در برنامه پیام‌رسان نیست.","notice"));
-    node.append(previews(value.destinations,targets));
-  } else if(value?.items) node=collection(base,value.items);
-  else if(value?.table_counts) node=card("اثر بازیابی در حالت امن",
-    table([["بخش","name"],["تعداد",row=>fa(row.count)]],[
-      ...Object.entries(value.table_counts).map(([name,count])=>({name:tableNames[name]||name,count})),
-      {name:"رسانه",count:value.media_count},{name:"کلیدهای رمزگذاری‌شده",count:value.secret_rekey_count},
-    ]),el("p","موتور، مقصدها، مسیرها و دسترسی‌های خارجی در بازیابی متوقف می‌شوند.","notice"));
-  else if(value?.policies) node=card("بودجه و سقف طرح",table([["نوع","policy_origin"],["دوره","period_kind"],["سقف (میکرو)",row=>fa(row.max_cost_micros)]],value.policies),
-    el("p","هزینه ثبت‌شده: "+fa(value.settled_spend_micros)));
-  else if(base.includes("/reports/export")) node=card("دریافت گزارش",button("دانلود",()=>download(
-    typeof value==="string"?value:JSON.stringify(value),typeof value==="string"?"report.csv":"report.json","application/octet-stream")));
-  else if(base.endsWith("/export")) node=card("بسته الگو",button("دانلود الگو",()=>download(JSON.stringify(value),"style.json","application/json")));
-  else if(value?.bundle_base64 || value?.manifest_id) node=card("پشتیبان رمزگذاری‌شده",
-    value.bundle_base64?button("دانلود .rfbak",()=>download(Uint8Array.from(atob(value.bundle_base64),char=>char.charCodeAt(0)),"tenant.rfbak","application/octet-stream")):
-      backupLink(value.manifest_id));
-  else if(value?.latency_ms!=null) node=card("نتیجه آزمون مدل",el("p",fa(value.latency_ms)+" میلی‌ثانیه"),statusPill(value.status));
-  else if(value?.webhook_token) node=card("اتصال وب‌هوک",el("p","کلید ثبت وب‌هوک را همین حالا در تنظیمات ربات وارد کنید."),ltr(value.webhook_token));
-  else node=card("نتیجه",el("p",value?.status?state(value.status):"درخواست انجام شد."));
-  mount.replaceChildren(node);
-}
-function backupLink(identifier){
-  const link=el("a","دریافت پشتیبان ثبت‌شده","button secondary");
-  link.href="/api/v1"+scoped("/backups/"+encodeURIComponent(identifier)+"/download");
-  return link;
-}
-const tableNames={drafts:"پیش‌نویس‌ها",draft_revisions:"بازبینی‌ها",brand_identities:"برندها",routes:"مسیرها",sources:"منابع",destinations:"مقصدها",media_assets:"دارایی‌های رسانه"};
-function archiveWizard() {
-  const form = document.createElement("form");
-  const heading = document.createElement("strong");
-  heading.textContent = "بارگذاری خروجی JSON از Telegram Desktop";
-  const notice = document.createElement("p");
-  notice.textContent = "Bot API آرشیو پیام‌های قبلی کانال را دریافت نمی‌کند.";
-  const source = el("select");
-  source.setAttribute("aria-label","منبع آرشیو");
-  setOptions(source, [], label);
-  items("/sources").then(rows=>setOptions(source,rows.filter(item=>item.source_kind==="TELEGRAM_DESKTOP_EXPORT"),label)).catch(error=>status(error.message));
-  source.required = true;
-  source.dir = "ltr";
-  const file = document.createElement("input");
-  file.type = "file";
-  file.accept = ".json,application/json";
-  file.required = true;
-  file.setAttribute("aria-label", "فایل خروجی آرشیو");
-  const progress = document.createElement("progress");
-  progress.max = 1;
-  progress.value = 0;
-  progress.setAttribute("aria-label", "پیشرفت بارگذاری");
-  const button = document.createElement("button");
-  button.textContent = "بارگذاری و ثبت آرشیو";
-  form.append(heading, notice, source, file, progress, button);
-  form.onsubmit = async event => {
-    event.preventDefault();
-    button.disabled = true;
-    progress.value = 0;
-    const path = scoped("/sources/" + encodeURIComponent(source.value) + "/exports");
-    try {
-      const chosen = file.files[0];
-      const job = await request(path + "/presign", "POST", {
-        file_size_bytes: chosen.size, job_mode: "ARCHIVE_INGEST"
-      });
-      const body = new FormData();
-      for (const [name, value] of Object.entries(job.form_fields)) body.append(name, value);
-      body.append("file", chosen);
-      await new Promise((resolve, reject) => {
-        const upload = new XMLHttpRequest();
-        upload.open("POST", job.upload_url);
-        upload.upload.onprogress = event => { if (event.lengthComputable) progress.value = event.loaded / event.total; };
-        upload.onerror = () => reject(Error("ارتباط با مخزن فایل برقرار نشد"));
-        upload.onload = () => upload.status >= 200 && upload.status < 300
-          ? resolve() : reject(Error("مخزن فایل بارگذاری را رد کرد"));
-        upload.send(body);
-      });
-      progress.value = 1;
-      render(await request(path + "/" + job.export_job_id + "/complete", "POST", {}),"/sources");
-    } catch (error) { status(error.message); }
-    finally { button.disabled = false; }
-  };
-  return form;
+
+  // S3 Export Wizard
+  const exportForm = el("form", null, "form-stack");
+  const expSel = el("select");
+  expSel.required = true;
+  setOptions(expSel, list.filter(s => s.source_kind === "TELEGRAM_DESKTOP_EXPORT"), itemLabel);
+  const fileIn = el("input");
+  fileIn.type = "file";
+  fileIn.accept = ".json,application/json";
+  fileIn.required = true;
+  const prog = el("progress");
+  prog.max = 1;
+  prog.value = 0;
+  const expBtn = el("button", "بارگذاری و ثبت آرشیو در S3", "btn-primary");
+  expBtn.type = "submit";
+  exportForm.append(
+    wrapField("انتخاب منبع آرشیو", expSel),
+    wrapField("فایل خروجی JSON از Telegram Desktop", fileIn),
+    prog,
+    expBtn,
+  );
+  exportForm.onsubmit = safe(async e => {
+    e.preventDefault();
+    const chosen = fileIn.files[0];
+    const base = scoped("/sources/" + encodeURIComponent(expSel.value) + "/exports");
+    const job = await request(base + "/presign", "POST", {
+      file_size_bytes: chosen.size,
+      job_mode: "ARCHIVE_INGEST",
+    });
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(job.form_fields || {})) fd.append(k, v);
+    fd.append("file", chosen);
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", job.upload_url);
+      xhr.upload.onprogress = ev => {
+        if (ev.lengthComputable) prog.value = ev.loaded / ev.total;
+      };
+      xhr.onerror = () => reject(Error("ارتباط با مخزن S3 برقرار نشد."));
+      xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(Error("بارگذاری رد شد.")));
+      xhr.send(fd);
+    });
+    prog.value = 1;
+    await request(base + "/" + job.export_job_id + "/complete", "POST", {});
+    status("آرشیو با موفقیت به S3 منتقل و ثبت شد.");
+  });
+
+  const leftCol = el("div", null, "stack");
+  leftCol.append(
+    card("منابع موجود", search, tblHost),
+    card("استخراج آرشیو از Telegram Desktop (ارسال مستقیم به S3)", exportForm),
+  );
+  const rightCol = el("div", null, "stack");
+  rightCol.append(
+    card("افزودن منبع جدید", addForm),
+    el("div", "نکته مهم: به دلیل محدودیت‌های Bot API تلگرام، استخراج کامل آرشیو پیام‌های قبلی کانال‌ها تنها از طریق فایل Export تلگرام دسکتاپ امکان‌پذیر است.", "notice"),
+  );
+  const grid = el("div", null, "grid-2");
+  grid.append(leftCol, rightCol);
+  mount.replaceChildren(grid);
 }
 
+/* ================= VIEW 3: DESTINATIONS ================= */
+async function renderDestinations(mount, stamp) {
+  const [dests, secrets] = await Promise.all([fetchList("/destinations"), fetchList("/security/secrets").catch(() => [])]);
+  if (stamp !== generation) return;
 
-function operation([heading,path,method,fields,serialize,needsConfirm], load) {
-  const form=el("form"), output=el("div"), advanced=el("details");
-  advanced.append(el("summary","تنظیمات پیشرفته"));
-  form.append(el("h3",heading));
-  if(path.endsWith("/reconcile")) form.dataset.reconcile="";
-  const controls=new Map(), records=new Map();
-  const action=el("button",heading,heading.includes("آزمایشی")?"amber":heading.includes("فنی")?"violet":heading.includes("حذف حساب")?"danger":"");
-  for(const [name,caption,kind,optional] of fields){
-    if(kind==="rows"){
-      const grid=el("fieldset");
-      grid.append(el("legend",caption));
-      function addRow(){
-        const row=el("div",null,"infographic-row");
-        for(const [name,title] of [["row_title","عنوان"],["row_value","مقدار"]]){
-          const wrap=el("label",title), input=el("input");
-          input.name=name;input.maxLength=140;input.required=true;
-          wrap.append(input);row.append(wrap);
-        }
-        row.append(button("حذف سطر",()=>{if(grid.querySelectorAll(".infographic-row").length>1)row.remove();}));
-        grid.insertBefore(row,add);
+  const selectedSel = el("select");
+  setOptions(selectedSel, dests, itemLabel, false);
+
+  const testConnBtn = button(
+    "تست فنی اتصال",
+    safe(async () => {
+      if (!selectedSel.value) return status("ابتدا یک مقصد انتخاب کنید.");
+      await request(scoped("/destinations/" + encodeURIComponent(selectedSel.value) + "/test-connection"), "POST", {});
+      status("تست فنی اتصال با موفقیت انجام شد.");
+    }),
+    "btn-violet btn-block",
+  );
+
+  const testText = el("textarea");
+  testText.placeholder = "متن پست آزمایشی واقعی برای ارسال به کانال مقصد...";
+  const testPubBtn = button(
+    "ارسال پست آزمایشی واقعی",
+    safe(async () => {
+      if (!selectedSel.value || !testText.value.trim()) return status("مقصد و متن آزمایشی را وارد کنید.");
+      if (!(await confirmAction("ارسال پست آزمایشی واقعی", "یک پیام واقعی به کانال مقصد ارسال خواهد شد."))) return;
+      await request(scoped("/destinations/" + encodeURIComponent(selectedSel.value) + "/test-publish"), "POST", {
+        text: testText.value,
+        explicit_user_confirmation: true,
+      });
+      status("پست آزمایشی واقعی با موفقیت ارسال شد.");
+    }),
+    "btn-primary btn-block",
+  );
+
+  const addForm = el("form", null, "form-stack");
+  const platSel = el("select");
+  platSel.name = "platform";
+  for (const p of ["TELEGRAM", "BALE", "EITAA", "RUBIKA_EXPERIMENTAL", "SOROUSH_EXPERIMENTAL"]) {
+    platSel.add(new Option(platform(p), p));
+  }
+  const nameIn = el("input");
+  nameIn.name = "display_name";
+  nameIn.required = true;
+  nameIn.placeholder = "کانال رسمی تلگرام";
+  const chatIn = el("input");
+  chatIn.name = "canonical_chat_id";
+  chatIn.required = true;
+  chatIn.dir = "ltr";
+  chatIn.placeholder = "@channel_id";
+  const secSel = el("select");
+  secSel.name = "secret_id";
+  secSel.required = true;
+  setOptions(secSel, secrets, itemLabel);
+  const addBtn = el("button", "ثبت مقصد جدید", "btn-primary");
+  addBtn.type = "submit";
+  addForm.append(
+    wrapField("پیام‌رسان", platSel),
+    wrapField("نام مقصد", nameIn),
+    wrapField("شناسه کانال مقصد", chatIn),
+    wrapField("انتخاب کلید از خزانه اسرار (Secret Vault)", secSel),
+    addBtn,
+  );
+  addForm.onsubmit = safe(async e => {
+    e.preventDefault();
+    await request(scoped("/destinations"), "POST", Object.fromEntries(new FormData(addForm)));
+    status("مقصد جدید با موفقیت ثبت شد.");
+    await show("destinations");
+  });
+
+  const tbl = table(
+    [
+      ["مقصد", "display_name"],
+      ["پیام‌رسان", r => platform(r.platform)],
+      ["شناسه", r => ltr(r.canonical_chat_id)],
+      ["وضعیت و رده بلوغ", r => maturityBadge(r.platform)],
+      ["آلبوم بومی", r => (r.capabilities_json?.native_albums ? "دارد" : "—")],
+      ["وضعیت", r => statusPill(r.is_enabled ? "ACTIVE" : "DISABLED")],
+    ],
+    dests,
+  );
+
+  const rightCol = el("div", null, "stack");
+  rightCol.append(
+    card("آزمون اتصال و ارسال آزمایشی", wrapField("مقصد انتخاب‌شده", selectedSel), testConnBtn, wrapField("متن تست واقعی", testText), testPubBtn),
+    card("افزودن مقصد جدید", addForm),
+  );
+  const grid = el("div", null, "grid-2");
+  grid.append(card("مقصدها و ماتریس قابلیت", tbl), rightCol);
+  mount.replaceChildren(grid);
+}
+
+/* ================= VIEW 4: ROUTES & DRY-RUN ================= */
+async function renderRoutes(mount, stamp) {
+  const [routes, sources, dests] = await Promise.all([
+    fetchList("/routes"),
+    fetchList("/sources"),
+    fetchList("/destinations"),
+  ]);
+  if (stamp !== generation) return;
+
+  const tbl = table(
+    [
+      ["نام مسیر", "display_name"],
+      ["حالت", r => el("span", r.route_mode, "pill purple")],
+      ["خودکارسازی", r => state(r.automation_level)],
+      ["وضعیت", r => statusPill(r.is_enabled ? "ACTIVE" : "DISABLED")],
+      [
+        "عملیات",
+        r =>
+          button(
+            r.is_enabled ? "توقف" : "فعال‌سازی",
+            safe(async () => {
+              await request(scoped("/routes/" + r.id), "PATCH", { is_enabled: !r.is_enabled });
+              await show("routes");
+            }),
+            "btn-outline btn-sm",
+          ),
+      ],
+    ],
+    routes,
+  );
+
+  // Dry-Run Card
+  const drySel = el("select");
+  setOptions(drySel, routes, itemLabel, false);
+  const sampleIn = el("textarea");
+  sampleIn.placeholder = "متن نمونه برای شبیه‌سازی مرحله‌به‌مرحله بدون ارسال واقعی...";
+  const dryOut = el("div");
+  const stepper = el("div", null, "stepper");
+  for (const [i, step] of ["۱. انتخاب محتوا", "۲. اعمال قوانین", "۳. پیش‌نمایش خروجی", "۴. گزارش نتیجه"].entries()) {
+    const box = el("div", null, "step-box");
+    box.append(el("span", fa(i + 1), "pill"), document.createTextNode(step.slice(3)));
+    stepper.append(box);
+  }
+  const dryBtn = button(
+    "اجرای شبیه‌سازی Dry-Run",
+    safe(async () => {
+      if (!drySel.value || !sampleIn.value.trim()) return status("مسیر و متن نمونه را وارد کنید.");
+      const res = await request(scoped("/routes/" + encodeURIComponent(drySel.value) + "/dry-run"), "POST", {
+        sample_text: sampleIn.value,
+      });
+      dryOut.replaceChildren(
+        el("p", "نتیجه شبیه‌سازی: " + state(res.decision || "COMPLETED"), "pill"),
+        ...(res.destinations || []).map(d =>
+          card(d.platform ? platform(d.platform) : "مقصد", el("div", d.formatting?.payload?.plain_text || d.filter_reason || "—", "bubble")),
+        ),
+      );
+    }),
+    "btn-violet",
+  );
+
+  // Create Route Card with 4 segmented mode buttons
+  let mode = "HYBRID";
+  const seg = el("div", null, "segmented");
+  for (const m of ["COPY", "RULES", "AI", "HYBRID"]) {
+    const b = button(m, () => {
+      mode = m;
+      seg.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+    }, m === mode ? "active" : "");
+    seg.append(b);
+  }
+  const createForm = el("form", null, "form-stack");
+  const slugIn = el("input");
+  slugIn.name = "slug";
+  slugIn.required = true;
+  slugIn.dir = "ltr";
+  slugIn.placeholder = "tech-news-route";
+  const rName = el("input");
+  rName.name = "display_name";
+  rName.required = true;
+  rName.placeholder = "مسیر بازنشر اخبار فناوری";
+  const srcMulti = el("select");
+  srcMulti.multiple = true;
+  srcMulti.required = true;
+  setOptions(srcMulti, sources, itemLabel, false);
+  const dstMulti = el("select");
+  dstMulti.multiple = true;
+  dstMulti.required = true;
+  setOptions(dstMulti, dests, itemLabel, false);
+  const kwIn = el("input");
+  kwIn.name = "keyword";
+  kwIn.placeholder = "کلمه کلیدی فیلتر (اختیاری)";
+  const rBtn = el("button", "ایجاد مسیر جدید", "btn-primary");
+  rBtn.type = "submit";
+  createForm.append(
+    wrapField("نام مسیر", rName),
+    wrapField("شناسه لاتین", slugIn),
+    wrapField("حالت پردازش", seg),
+    wrapField("منابع (چندانتخابی)", srcMulti),
+    wrapField("مقصدها (چندانتخابی)", dstMulti),
+    wrapField("فیلتر کلیدواژه", kwIn),
+    rBtn,
+  );
+  createForm.onsubmit = safe(async e => {
+    e.preventDefault();
+    const sIds = Array.from(srcMulti.selectedOptions, o => o.value);
+    const dIds = Array.from(dstMulti.selectedOptions, o => o.value);
+    if (!sIds.length || !dIds.length) return status("حداقل یک منبع و یک مقصد انتخاب کنید.");
+    await request(scoped("/routes"), "POST", {
+      slug: slugIn.value,
+      display_name: rName.value,
+      source_ids: sIds,
+      destination_ids: dIds,
+      route_mode: mode,
+      automation_level: "APPROVAL_REQUIRED",
+      filter_ast: kwIn.value ? { op: "regex_match", value: kwIn.value } : {},
+    });
+    status("مسیر جدید ساخته شد.");
+    await show("routes");
+  });
+
+  const leftCol = el("div", null, "stack");
+  leftCol.append(
+    card("مسیرهای موجود", tbl),
+    card("شبیه‌ساز Dry-Run (بدون انتشار واقعی)", stepper, wrapField("انتخاب مسیر", drySel), wrapField("متن نمونه", sampleIn), dryBtn, dryOut),
+  );
+  const grid = el("div", null, "grid-2");
+  grid.append(leftCol, card("ایجاد مسیر جدید", createForm));
+  mount.replaceChildren(grid);
+}
+
+/* ================= VIEW 5: CONTENT STUDIO ================= */
+async function renderContentStudio(mount, stamp) {
+  const [styles, providers] = await Promise.all([fetchList("/styles"), fetchList("/ai/providers")]);
+  if (stamp !== generation) return;
+
+  let freedom = "BALANCED";
+  const freedomDefs = [
+    ["STRICT", "سخت‌گیرانه", "دقیق و نزدیک به متن مرجع"],
+    ["BALANCED", "متعادل (پیشنهادی)", "بازنویسی روان با حفظ کامل حقایق"],
+    ["CREATIVE", "خلاقانه", "خلاقانه و تحلیلی با کنترل اعداد"],
+    ["UNRESTRICTED", "کاملاً آزاد", "آزاد (گارد صحت خاموش)"],
+  ];
+  const fGrid = el("div", null, "freedom-grid");
+  for (const [code, label, desc] of freedomDefs) {
+    const fc = el("button", null, "freedom-card" + (code === freedom ? " active" : ""));
+    fc.type = "button";
+    fc.append(el("strong", label), el("small", desc));
+    fc.onclick = () => {
+      freedom = code;
+      fGrid.querySelectorAll(".freedom-card").forEach(x => x.classList.toggle("active", x === fc));
+    };
+    fGrid.append(fc);
+  }
+
+  const rawIn = el("textarea");
+  rawIn.rows = 6;
+  rawIn.placeholder = "متن ورودی (مرجع) خود را اینجا بنویسید یا پیست کنید...";
+  const styleSel = el("select");
+  setOptions(styleSel, styles, itemLabel);
+  const provSel = el("select");
+  setOptions(provSel, providers, itemLabel);
+  const outHost = el("div", null, "stack");
+  outHost.append(el("p", "پس از کلیک روی «تولید محتوا»، خروجی پیشنهادی و گزارش Fact Guard اینجا نمایش داده می‌شوند.", "empty"));
+
+  const genBtn = button(
+    "تولید محتوا",
+    safe(async () => {
+      if (!rawIn.value.trim()) return status("متن ورودی را وارد کنید.");
+      const res = await request(scoped("/studio/generate"), "POST", {
+        input_mode: "MANUAL_TEXT",
+        raw_text: rawIn.value,
+        task_type: "REWRITE",
+        freedom_mode: freedom,
+        routing_mode: "AUTO_ECONOMY",
+        ...(styleSel.value ? { style_profile_id: styleSel.value } : {}),
+        ...(provSel.value ? { manual_provider_id: provSel.value } : {}),
+      });
+      outHost.replaceChildren();
+      for (const c of res.candidates || []) {
+        const diff = c.fact_diff_json || {};
+        const blocked = c.fact_guard_verdict === "FACT_MISMATCH_BLOCKED";
+        const pills = el("div", null, "fact-pills");
+        pills.append(
+          el("span", blocked ? "مغایرت مسدود شد" : "تأییدشده", blocked ? "pill stopped" : "pill"),
+          el("span", "حذف‌شده: " + fa(diff.missing?.length || 0), "pill warning"),
+          el("span", "افزوده‌شده: " + fa(diff.introduced?.length || 0), "pill purple"),
+        );
+        const diffList = el("ul");
+        for (const m of diff.missing || []) diffList.append(el("li", "حذف‌شده از مرجع: " + m));
+        for (const a of diff.introduced || []) diffList.append(el("li", "افزوده‌شده در خروجی: " + a));
+        outHost.append(
+          card("خروجی پیشنهادی", el("div", c.text || "—", "bubble")),
+          card("Fact Guard · بررسی صحت اعداد و ادعاها", pills, diffList.children.length ? diffList : el("p", "مغایرتی یافت نشد.", "view-subtitle")),
+        );
       }
-      const add=button("افزودن سطر",()=>{if(grid.querySelectorAll(".infographic-row").length<12)addRow();});
-      grid.append(add);addRow();form.append(grid);continue;
-    }
-    if(kind==="derived") continue;
-    const wrapper=el("label",caption);
-    if(kind==="freedom" || name==="resolution_action") {
-      const fieldset=el("fieldset",null,kind==="freedom"?"freedoms":"");
-      fieldset.append(el("legend",caption));
-      const values=kind==="freedom"?["STRICT","BALANCED","CREATIVE","UNRESTRICTED"]:kind;
-      values.forEach((value,index)=>{
-        const row=el("label"), input=el("input");
-        input.type="radio";input.name=name;input.value=value;
-        input.checked=kind==="freedom"?value==="BALANCED":index===0;
-        row.append(input,el("span",state(value)));fieldset.append(row);
+      status("تولید محتوا و بررسی Fact Guard انجام شد.");
+    }),
+    "btn-primary",
+  );
+
+  const mainCol = el("div", null, "grid-2-eq");
+  mainCol.append(
+    card("متن ورودی (مرجع)", rawIn, genBtn),
+    el("div", null, "stack"),
+  );
+  mainCol.lastChild.append(outHost);
+
+  const adv = card(
+    "تنظیمات پیشرفته",
+    wrapField("سبک نگارش", styleSel),
+    wrapField("ارائه‌دهنده هوش مصنوعی", provSel),
+  );
+  const layout = el("div", null, "grid-2");
+  layout.append(mainCol, adv);
+  mount.replaceChildren(fGrid, layout);
+}
+
+/* ================= VIEW 6: CHANNEL INTELLIGENCE ================= */
+async function renderIntelligence(mount, stamp) {
+  const [sources, analyses] = await Promise.all([
+    fetchList("/sources"),
+    fetchList("/channel-intelligence/analyses").catch(() => []),
+  ]);
+  if (stamp !== generation) return;
+
+  const srcSel = el("select");
+  setOptions(srcSel, sources, itemLabel, false);
+  const runBtn = button(
+    "آغاز تحلیل کانال",
+    safe(async () => {
+      if (!srcSel.value) return status("یک منبع انتخاب کنید.");
+      await request(scoped("/channel-intelligence/analyses"), "POST", {
+        source_id: srcSel.value,
+        requested_sample_count: 120,
       });
-      form.append(fieldset);continue;
+      status("تحلیل هوشمند کانال در صف قرار گرفت.");
+      await show("intelligence");
+    }),
+    "btn-primary",
+  );
+
+  const donutCard = card(
+    "تفکیک نمونه‌گیری ۸۰/۲۰",
+    el("div", null, "donut"),
+    el("p", "۸۰٪ استخراج الگو · ۲۰٪ ارزیابی مستقل", "view-subtitle"),
+    el("div", "هویت کانال‌های ثالث به صورت پیش‌فرض حذف (STRIP_BY_DEFAULT) می‌شود.", "notice"),
+  );
+
+  const tbl = table(
+    [
+      ["کانال هدف", r => ltr(r.target_channel_ref)],
+      ["نمونه‌های یکتا", r => fa(r.unique_sample_count)],
+      ["وضعیت", r => statusPill(r.status)],
+    ],
+    analyses,
+  );
+
+  const grid = el("div", null, "grid-2");
+  grid.append(
+    card("گزارش تحلیل‌های کانال", wrapField("انتخاب منبع", srcSel), runBtn, tbl),
+    donutCard,
+  );
+  mount.replaceChildren(grid);
+}
+
+/* ================= VIEW 7: STYLES ================= */
+async function renderStyles(mount, stamp) {
+  const styles = await fetchList("/styles");
+  if (stamp !== generation) return;
+
+  const cards = el("div", null, "grid-2-eq");
+  for (const s of styles) {
+    cards.append(
+      card(
+        itemLabel(s),
+        el("span", "نسخه " + fa(s.pinned_revision_no), "pill"),
+        el("p", "دسته‌بندی: " + (s.content_category || "عمومی"), "view-subtitle"),
+      ),
+    );
+  }
+  const f1 = el("select");
+  const f2 = el("select");
+  setOptions(f1, styles, itemLabel);
+  setOptions(f2, styles, itemLabel);
+  const range = el("input");
+  range.type = "range";
+  range.min = "10";
+  range.max = "90";
+  range.value = "60";
+  const out = el("p", "۶۰٪ سبک اول / ۴۰٪ سبک دوم", "pill");
+  range.oninput = () => {
+    out.textContent = fa(range.value) + "٪ سبک اول / " + fa(100 - Number(range.value)) + "٪ سبک دوم";
+  };
+  const mixTitle = el("input");
+  mixTitle.placeholder = "نام الگوی ترکیبی";
+  const mixBtn = button(
+    "ذخیره ترکیب وزنی",
+    safe(async () => {
+      if (!f1.value || !f2.value || !mixTitle.value.trim()) return status("دو سبک و نام ترکیب را وارد کنید.");
+      await request(scoped("/styles/compose"), "POST", {
+        slug: "mix-" + Date.now(),
+        title: mixTitle.value,
+        styles: [
+          { style_id: f1.value, weight: Number(range.value) / 100 },
+          { style_id: f2.value, weight: (100 - Number(range.value)) / 100 },
+        ],
+      });
+      status("الگوی ترکیبی ذخیره شد.");
+      await show("styles");
+    }),
+    "btn-primary",
+  );
+
+  const grid = el("div", null, "grid-2");
+  grid.append(
+    card("فهرست سبک‌های نوشتار", cards.children.length ? cards : el("p", "الگویی ثبت نشده است.", "empty")),
+    card("ترکیب وزن‌دار سبک‌ها", wrapField("سبک اول", f1), wrapField("سبک دوم", f2), wrapField("نسبت ترکیب", range), out, wrapField("نام ترکیب", mixTitle), mixBtn),
+  );
+  mount.replaceChildren(grid);
+}
+
+/* ================= VIEW 8: MEDIA & PODCAST ================= */
+async function renderMedia(mount, stamp) {
+  const [assets, jobs] = await Promise.all([fetchList("/media/assets"), fetchList("/media/jobs").catch(() => [])]);
+  if (stamp !== generation) return;
+
+  const tabBar = el("div", null, "tabs");
+  const tabHost = el("div");
+  const drawTab = name => {
+    tabBar.querySelectorAll("button").forEach(b => b.classList.toggle("active", b.textContent === name));
+    if (name === "کتابخانه رسانه") {
+      tabHost.replaceChildren(
+        card(
+          "کتابخانه رسانه",
+          table(
+            [
+              ["نوع", "media_kind"],
+              ["خاستگاه", "origin_kind"],
+              ["حجم", r => bytes(r.byte_size)],
+            ],
+            assets,
+          ),
+        ),
+      );
+    } else if (name === "سازنده اینفوگرافیک") {
+      const t = el("input");
+      t.placeholder = "عنوان اینفوگرافیک فارسی";
+      const k = el("input");
+      k.placeholder = "برچسب سطر (مثلاً نرخ رشد)";
+      const v = el("input");
+      v.placeholder = "مقدار (مثلاً ۲۴٪)";
+      const b = button(
+        "تولید اینفوگرافیک",
+        safe(async () => {
+          await request(scoped("/media/jobs"), "POST", {
+            job_kind: "INFOGRAPHIC_RENDER",
+            title: t.value || "اینفوگرافیک",
+            table_rows: [[k.value || "شاخص", v.value || "۱۰۰"]],
+          });
+          status("کار تولید اینفوگرافیک ثبت شد.");
+        }),
+        "btn-primary",
+      );
+      tabHost.replaceChildren(card("سازنده اینفوگرافیک فارسی", wrapField("عنوان", t), wrapField("برچسب", k), wrapField("مقدار", v), b));
+    } else {
+      tabHost.replaceChildren(
+        card(
+          "کارهای پردازش رسانه و پادکست",
+          table(
+            [
+              ["نوع کار", "job_kind"],
+              ["وضعیت", r => statusPill(r.status)],
+              ["زمان ثبت", r => date(r.created_at)],
+            ],
+            jobs,
+          ),
+        ),
+      );
     }
-    const isPicker=["pick","multi"].includes(kind);
-    const input=el(isPicker||Array.isArray(kind)?"select":kind==="textarea"?"textarea":"input");
-    input.name=name;input.required=!optional&&kind!=="checkbox";
-    controls.set(name,input);
-    wrapper.append(input);
-    if(kind==="multi") input.multiple=true;
-    if(isPicker){
-      setOptions(input,[],label);
-      const endpoint=pickerPath(name,path);
-      if(endpoint){
-        const filter=rows=>rows.filter(row=>{
-          if(path.endsWith("/reconcile")) return row.status==="UNCERTAIN";
-          if(name==="podcast_script_id") return ["APPROVED","READY"].includes(row.status);
-          if(path.endsWith("/test-publish")) return !row.is_archived;
-          return true;
+  };
+  for (const name of ["کتابخانه رسانه", "سازنده اینفوگرافیک", "کارهای رسانه"]) {
+    tabBar.append(button(name, () => drawTab(name)));
+  }
+  drawTab("کتابخانه رسانه");
+  mount.replaceChildren(tabBar, tabHost);
+}
+
+/* ================= VIEW 9: AI SETTINGS ================= */
+async function renderAI(mount, stamp) {
+  const [providers, consents] = await Promise.all([
+    fetchList("/ai/providers"),
+    fetchList("/security/consents").catch(() => []),
+  ]);
+  if (stamp !== generation) return;
+
+  let activeType = "OPENAI";
+  const provList = el("div", null, "form-stack");
+  for (const [code, label] of [
+    ["OPENAI", "OpenAI"],
+    ["GEMINI", "Gemini"],
+    ["COMPATIBLE_OPENAI", "Compatible OpenAI"],
+  ]) {
+    const pc = el("div", null, "provider-card" + (code === activeType ? " active" : ""));
+    pc.append(el("strong", label), el("span", code === activeType ? "انتخاب‌شده" : "انتخاب", "pill"));
+    pc.onclick = () => {
+      activeType = code;
+      provList.querySelectorAll(".provider-card").forEach(x => x.classList.toggle("active", x === pc));
+    };
+    provList.append(pc);
+  }
+  const pName = el("input");
+  pName.placeholder = "نام نمایشی (مثلاً OpenAI اصلی)";
+  const pKey = el("input");
+  pKey.type = "password";
+  pKey.placeholder = "کلید API (ذخیره رمزنگاری‌شده در خزانه)";
+  const saveProv = button(
+    "ذخیره کلید ارائه‌دهنده",
+    safe(async () => {
+      if (!pName.value || !pKey.value) return status("نام و کلید API را وارد کنید.");
+      await request(scoped("/ai/providers"), "PUT", {
+        provider_type: activeType,
+        display_name: pName.value,
+        api_key: pKey.value,
+      });
+      pKey.value = "";
+      status("ارائه‌دهنده هوش مصنوعی با موفقیت ذخیره شد.");
+      await show("ai");
+    }),
+    "btn-primary",
+  );
+
+  const consentHost = el("div");
+  const scopes = [
+    ["OPENAI_TEXT", "استفاده از سرویس متن OpenAI"],
+    ["GEMINI_TEXT", "استفاده از سرویس متن Gemini"],
+    ["STOCK_MEDIA_SEARCH", "جستجوی رسانه استوک دارای مجوز"],
+  ];
+  for (const [sc, desc] of scopes) {
+    const existing = consents.find(c => c.provider_scope === sc);
+    const granted = Boolean(existing?.is_granted);
+    const row = el("div", null, "consent-row");
+    const info = el("div");
+    info.append(el("strong", sc), el("p", desc, "view-subtitle"));
+    const toggle = button(
+      granted ? "فعال" : "غیرفعال",
+      safe(async () => {
+        await request(scoped("/security/consents"), "PUT", {
+          provider_scope: sc,
+          is_granted: !granted,
         });
-        load(endpoint).then(rows=>{
-          records.set(name,filter(rows));
-          setOptions(input,records.get(name),label);
-          input.dispatchEvent(new Event("change"));
-        }).catch(error=>status(error.message));
-      }
-    }else if(Array.isArray(kind)){
-      kind.forEach(value=>input.add(new Option(platform(state(value)),value)));
-    }else if(input.tagName==="INPUT"){
-      input.type=kind.endsWith("-file")?"file":kind;
-      if(input.type==="password") input.autocomplete="off";
-      if(kind==="upload-file") input.accept="image/*,video/*,audio/*";
-      if(kind==="json-file") input.accept=".json,application/json";
-      if(kind==="backup-file") input.accept=".rfbak,application/octet-stream";
-      if(kind==="number"){input.min="0";input.step="1";}
-      if(kind==="range"){
-        input.min="0";input.max="100";input.value="70";
-        const complementary=el("output");
-        const sync=()=>{complementary.textContent=fa(input.value)+"٪ / "+fa(100-Number(input.value))+"٪";};
-        input.oninput=sync;sync();wrapper.append(complementary);
-      }
-    }
-    (optional==="advanced"?advanced:form).append(wrapper);
+        status("تنظیم رضایت خارجی به‌روزرسانی شد.");
+        await show("ai");
+      }),
+      granted ? "btn-primary btn-sm" : "btn-outline btn-sm",
+    );
+    row.append(info, toggle);
+    consentHost.append(row);
   }
-  if(advanced.children.length>1) form.append(advanced);
-  form.append(action,output);
-  const provider=controls.get("provider_id")||controls.get("manual_provider_id");
-  const model=controls.get("model_id")||controls.get("manual_model_id");
-  const modality=controls.get("modality");
-  if(provider&&model?.tagName==="SELECT"){
-    async function models(refresh=false) {
-      const selected=provider.value, type=modality?.value||(path==="/media/jobs"?"TTS":"TEXT");
-      setOptions(model,[],label);
-      if(!selected) return;
-      const result=await query("/ai/providers/"+encodeURIComponent(selected)+"/models?"+
-        new URLSearchParams({modality:type,...(refresh?{refresh:"true"}:{})}));
-      if(provider.value===selected && (!modality||modality.value===type))
-        setOptions(model,result.items.map(item=>({...item,id:item.model_id})),item=>item.model_id);
-    }
-    provider.addEventListener("change",attempt(()=>models()));
-    modality?.addEventListener("change",attempt(()=>models()));
-    (advanced.parentElement ? advanced : form).insertBefore(
-      button("به‌روزرسانی مدل‌ها",attempt(()=>models(true))),advanced.parentElement ? null : action);
-  }
-  const draft=controls.get("id");
-  if(path.startsWith("/drafts/")&&method==="PATCH") draft.addEventListener("change",attempt(async()=>{
-    const id=draft.value;if(!id) return;
-    const record=await query("/drafts/"+encodeURIComponent(id));
-    if(draft.value!==id) return;
-    controls.get("body_text").value=record.body_text;
-    controls.get("title_text").value=record.title_text||"";
-    controls.get("brand_identity_id").value=record.brand_identity_id||"";
-    for(const option of controls.get("assets").options) option.selected=(record.media_manifest_json||[]).includes(option.value);
-  }));
-  if(path.endsWith("/reconcile")){
-    const ack=controls.get("acknowledge_duplicate_risk");
-    const sync=()=>{action.disabled=!draft.value || (form.elements.resolution_action.value==="CONFIRM_NOT_SENT_REQUEUE"&&!ack.checked);};
-    form.addEventListener("change",sync);sync();
-  }
-  let restorePreview;
-  form.onsubmit=async event=>{
-    event.preventDefault();
-    const raw=new FormData(form), values=Object.fromEntries(raw);
-    const owner=workspace, activeView=current;
-    for(const [name,control] of controls) if(control.multiple) values[name]=raw.getAll(name);
-    if(raw.has("row_title"))values.table_rows=raw.getAll("row_title").map((title,index)=>[title,raw.getAll("row_value")[index]]);
-    const selected=(records.get("id")||[]).find(row=>row.id===values.id);
-    if(selected){
-      values.revision=selected.current_revision_no;
-      values.expected_lease_epoch=selected.lease_epoch;
-    }
-    if(needsConfirm && !(path.endsWith("/restore")&&values.mode==="PREVIEW") &&
-      !await confirmAction(heading,path.includes("delete-account")?"حذف حساب برگشت‌ناپذیر است. داده‌ها تا ۱۴ روز در نسخه‌های فیزیکی PITR می‌مانند.":undefined)) return;
-    if(owner!==workspace || activeView!==current) return;
-    action.disabled=true;
-    form.querySelectorAll('input[type="password"]').forEach(input=>{input.value="";});
-    try{
-      for(const [name,,kind] of fields){
-        const file=values[name];
-        if(!kind.endsWith?.("-file")) continue;
-        if(!file?.size){delete values[name];continue;}
-        if(kind==="upload-file") continue;
-        if(file.size>524288) throw Error("فایل برای ورود مستقیم بزرگ است. پشتیبان‌های بزرگ را از فهرست انتخاب کنید.");
-        values[name]=kind==="json-file"?JSON.parse(await file.text()):btoa(Array.from(new Uint8Array(await file.arrayBuffer()),byte=>String.fromCharCode(byte)).join(""));
-      }
-      if(path.endsWith("/restore")){
-        const file=controls.get("bundle_base64").files[0];
-        const choice=values.manifest_id || file;
-        if(values.mode==="APPLY" && (!choice || choice!==restorePreview)) throw Error("ابتدا اثر همین پشتیبان را پیش‌نمایش کنید.");
-      }
-      if(path.endsWith("/reconcile")&&values.resolution_action==="CONFIRM_NOT_SENT_REQUEUE"&&values.acknowledge_duplicate_risk!=="on")
-        throw Error("ریسک ارسال تکراری را تأیید کنید.");
-      const resolved=path.replace(/\{([a-z_]+)\}/g,(_,key)=>encodeURIComponent(values[key]||""));
-      const endpoint=resolved.startsWith("!")?resolved.slice(1):scoped(resolved);
-      const value=await request(endpoint,method,method==="GET"?undefined:serialize(values));
-      if(owner!==workspace || activeView!==current) return;
-      const destinations=value?.destinations?await load("/destinations"):undefined;
-      render(value,resolved,values.raw_text||values.media_kind,destinations,output);
-      if(path.endsWith("/restore")&&values.mode==="PREVIEW")
-        restorePreview=values.manifest_id||controls.get("bundle_base64").files[0];
-      if(path.includes("delete-account")) { location.assign("/"); return; }
-      if(method!=="GET"&&path!=="/backups/restore") await refreshPane();
-      status("عملیات انجام شد.");
-    }catch(error){status(error instanceof SyntaxError?"فایل الگو معتبر نیست.":error.message);}
-    finally{action.disabled=false; if(path.endsWith("/reconcile")) form.dispatchEvent(new Event("change"));}
-  };
-  form.refreshPickers=async()=>{
-    await Promise.all([...records.keys()].map(async name=>{
-      const rows=await load(pickerPath(name,path));
-      const filtered=rows.filter(row=>path.endsWith("/reconcile")?row.status==="UNCERTAIN":
-        name==="podcast_script_id"?["APPROVED","READY"].includes(row.status):true);
-      records.set(name,filtered);setOptions(controls.get(name),filtered,label);
-    }));
-  };
-  return form;
+
+  const grid = el("div", null, "grid-2-eq");
+  grid.append(
+    card("ارائه‌دهنده هوش مصنوعی (BYOK)", provList, wrapField("نام نمایشی", pName), wrapField("کلید API", pKey), saveProv),
+    card("رضایت و دسترسی‌های خارجی", consentHost, el("p", "ارائه‌دهندگان ثبت‌شده: " + fa(providers.length), "pill")),
+  );
+  mount.replaceChildren(grid);
 }
+
+/* ================= VIEW 10: DRAFTS & PUBLISH ================= */
+async function renderDrafts(mount, stamp) {
+  const [drafts, dests] = await Promise.all([fetchList("/drafts"), fetchList("/destinations")]);
+  if (stamp !== generation) return;
+
+  let activeDraft = drafts[0] || null;
+  const bodyIn = el("textarea");
+  bodyIn.rows = 6;
+  bodyIn.placeholder = "متن پیش‌نویس را وارد یا ویرایش کنید...";
+  const dstSel = el("select");
+  setOptions(dstSel, dests, itemLabel, false);
+
+  const previewBubble = el("div", "متن پیش‌نمایش پیام‌رسان اینجا نمایش داده می‌شود.", "bubble");
+  if (activeDraft) {
+    query("/drafts/" + encodeURIComponent(activeDraft.id))
+      .then(d => {
+        bodyIn.value = d.body_text || "";
+        previewBubble.textContent = d.body_text || "—";
+      })
+      .catch(() => {});
+  }
+  bodyIn.oninput = () => {
+    previewBubble.textContent = bodyIn.value || "—";
+  };
+
+  const btnBar = el("div", null, "toolbar");
+  btnBar.append(
+    button(
+      "ذخیره پیش‌نویس",
+      safe(async () => {
+        if (!bodyIn.value.trim()) return status("متن پیش‌نویس خالی است.");
+        await request(scoped("/drafts"), "POST", { body_text: bodyIn.value });
+        status("پیش‌نویس جدید ذخیره شد.");
+        await show("drafts");
+      }),
+      "btn-outline",
+    ),
+    button(
+      "ارسال آزمایشی واقعی",
+      safe(async () => {
+        if (!activeDraft || !dstSel.value) return status("پیش‌نویس و مقصد را انتخاب کنید.");
+        if (!(await confirmAction("ارسال آزمایشی واقعی", "نسخه آزمایشی به مقصد انتخاب‌شده ارسال می‌شود."))) return;
+        await request(scoped("/drafts/" + activeDraft.id + "/publish"), "POST", {
+          destination_ids: [dstSel.value],
+          album_fallback_policy: "SEQUENTIAL_POSTS",
+          mode: "EXPLICIT_TEST_SEND",
+          expected_draft_revision_no: activeDraft.current_revision_no || 1,
+          explicit_user_confirmation: true,
+        });
+        status("ارسال آزمایشی در صف تحویل ثبت شد.");
+      }),
+      "btn-amber",
+    ),
+    button(
+      "انتشار نهایی",
+      safe(async () => {
+        if (!activeDraft || !dstSel.value) return status("پیش‌نویس و مقصد را انتخاب کنید.");
+        if (!(await confirmAction("تأیید انتشار نهایی", "نسخه انتشار منجمد شده و برای ارسال نهایی در صف قرار می‌گیرد."))) return;
+        await request(scoped("/drafts/" + activeDraft.id + "/publish"), "POST", {
+          destination_ids: [dstSel.value],
+          album_fallback_policy: "SEQUENTIAL_POSTS",
+          mode: "LIVE_PUBLISH",
+          expected_draft_revision_no: activeDraft.current_revision_no || 1,
+          explicit_user_confirmation: true,
+        });
+        status("انتشار نهایی با موفقیت ثبت و صف‌بندی شد.");
+      }),
+      "btn-primary",
+    ),
+  );
+
+  const grid = el("div", null, "grid-2");
+  grid.append(
+    card("ویرایش پیش‌نویس و تنظیمات انتشار", wrapField("مقصد انتشار", dstSel), wrapField("متن محتوا", bodyIn), btnBar),
+    card("پیش‌نمایش پیام‌رسان", previewBubble, el("div", "پیش‌نمایش وب جایگزین نمایش واقعی در برنامه پیام‌رسان نیست.", "notice")),
+  );
+  mount.replaceChildren(grid);
+}
+
+/* ================= VIEW 11: DELIVERY & UNCERTAIN ================= */
+async function renderDelivery(mount, stamp) {
+  let activeStatus = "";
+  const filterBar = el("div", null, "tabs");
+  const tblHost = el("div");
+  const recHost = el("div");
+
+  const loadDeliveries = async () => {
+    const q = activeStatus ? "/deliveries?status=" + encodeURIComponent(activeStatus) : "/deliveries";
+    const rows = await fetchList(q);
+    if (stamp !== generation) return;
+    tblHost.replaceChildren(
+      table(
+        [
+          ["وضعیت", r => statusPill(r.status)],
+          ["زمان برنامه‌ریزی", r => date(r.scheduled_for)],
+          ["تلاش", r => fa(r.attempts)],
+          ["جزئیات", r => r.last_error_safe || "—"],
+          [
+            "عملیات",
+            r =>
+              r.status === "UNCERTAIN"
+                ? button("تعیین تکلیف", () => mountReconcile(r), "btn-amber btn-sm")
+                : "—",
+          ],
+        ],
+        rows,
+      ),
+    );
+    const firstUnc = rows.find(r => r.status === "UNCERTAIN");
+    if (firstUnc) mountReconcile(firstUnc);
+  };
+
+  function mountReconcile(row) {
+    let decision = "DISCARD_DO_NOT_SEND";
+    const radios = el("div", null, "form-stack");
+    for (const [code, label] of [
+      ["CONFIRM_SENT", "ارسال عادی تأیید شد (CONFIRM_SENT)"],
+      ["CONFIRM_NOT_SENT_REQUEUE", "ارسال مجدد با بازبینی (RESEND)"],
+      ["DISCARD_DO_NOT_SEND", "انصراف و عدم ارسال (DISCARD_DO_NOT_SEND)"],
+    ]) {
+      const r = el("div", null, "provider-card" + (code === decision ? " active" : ""));
+      r.append(el("strong", label));
+      r.onclick = () => {
+        decision = code;
+        radios.querySelectorAll(".provider-card").forEach(x => x.classList.toggle("active", x === r));
+      };
+      radios.append(r);
+    }
+    const reasonIn = el("input");
+    reasonIn.placeholder = "دلیل تصمیم (حداقل ۳ کاراکتر)...";
+    const ack = el("input");
+    ack.type = "checkbox";
+    const ackLabel = el("label", null, "check-row");
+    ackLabel.append(ack, el("span", "ریسک ارسال تکراری را می‌پذیرم"));
+    const execBtn = button(
+      "اجرای تصمیم آشتی",
+      safe(async () => {
+        if (decision === "CONFIRM_NOT_SENT_REQUEUE" && !ack.checked) {
+          return status("برای ارسال مجدد، تیک پذیرش ریسک ارسال تکراری الزامی است.");
+        }
+        await request(scoped("/deliveries/" + row.id + "/reconcile"), "POST", {
+          expected_lease_epoch: row.lease_epoch || 1,
+          resolution_action: decision,
+          reason: reasonIn.value || "تعیین تکلیف توسط مدیر",
+          acknowledge_duplicate_risk: ack.checked,
+        });
+        status("تعیین تکلیف وضعیت UNCERTAIN با موفقیت ثبت شد.");
+        await loadDeliveries();
+      }),
+      "btn-primary btn-block",
+    );
+    recHost.replaceChildren(
+      card(
+        "میز آشتی پیام‌های نامطمئن (UNCERTAIN)",
+        el("span", row.last_error_safe || "UNCERTAIN", "pill warning"),
+        radios,
+        wrapField("توضیح / دلیل", reasonIn),
+        ackLabel,
+        execBtn,
+      ),
+    );
+  }
+
+  for (const [code, cap] of [
+    ["", "همه"],
+    ["UNCERTAIN", "نامطمئن"],
+    ["FAILED", "ناموفق"],
+    ["SENT", "ارسال‌شده"],
+    ["SCHEDULED", "زمان‌بندی‌شده"],
+    ["READY", "آماده"],
+  ]) {
+    const b = button(cap, safe(async () => {
+      activeStatus = code;
+      filterBar.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+      await loadDeliveries();
+    }));
+    if (!code) b.classList.add("active");
+    filterBar.append(b);
+  }
+
+  recHost.replaceChildren(card("میز آشتی UNCERTAIN", el("p", "روی یک ردیف نامطمئن کلیک کنید.", "empty")));
+  const grid = el("div", null, "grid-2");
+  grid.append(card("صف تحویل محتوا", filterBar, tblHost), recHost);
+  mount.replaceChildren(grid);
+  await loadDeliveries();
+}
+
+/* ================= VIEW 12: OPERATIONS & BACKUPS ================= */
+async function renderOperations(mount, stamp) {
+  const [audits, backups] = await Promise.all([
+    fetchList("/audit-events").catch(() => []),
+    fetchList("/backups").catch(() => []),
+  ]);
+  if (stamp !== generation) return;
+
+  const csvBtn = button(
+    "دانلود گزارش CSV ایمن",
+    safe(async () => {
+      const csv = await query("/reports/export?format=csv");
+      download(csv, "relayforge-report.csv", "text/csv;charset=utf-8");
+    }),
+    "btn-outline",
+  );
+  const jsonBtn = button(
+    "دانلود گزارش JSON",
+    safe(async () => {
+      const data = await query("/reports/export?format=json");
+      download(JSON.stringify(data, null, 2), "relayforge-report.json", "application/json");
+    }),
+    "btn-outline",
+  );
+  const cleanBtn = button(
+    "پاکسازی فایل‌های منقضی",
+    safe(async () => {
+      if (!(await confirmAction("پاکسازی فضای ذخیره‌سازی", "فایل‌های منقضی و بدون ارجاع پاکسازی می‌شوند."))) return;
+      await request(scoped("/maintenance/cleanup"), "POST", {});
+      status("پاکسازی با موفقیت انجام شد.");
+    }),
+    "btn-outline",
+  );
+
+  const bpPass = el("input");
+  bpPass.type = "password";
+  bpPass.placeholder = "گذرواژه رمزگذاری پشتیبان (حداقل ۱۲ کاراکتر)";
+  const bpBtn = button(
+    "تهیه پشتیبان رمزگذاری‌شده (.rfbak)",
+    safe(async () => {
+      if (bpPass.value.length < 12) return status("گذرواژه پشتیبان باید حداقل ۱۲ کاراکتر باشد.");
+      const res = await request(scoped("/backups"), "POST", {
+        backup_password: bpPass.value,
+        backup_scope: "TENANT_FULL_LOGICAL",
+        include_media_assets: false,
+        includes_reencrypted_secrets: false,
+      });
+      bpPass.value = "";
+      if (res.bundle_base64) {
+        download(Uint8Array.from(atob(res.bundle_base64), c => c.charCodeAt(0)), "tenant.rfbak", "application/octet-stream");
+      }
+      status("پشتیبان رمزگذاری‌شده ایجاد شد.");
+      await show("operations");
+    }),
+    "btn-primary",
+  );
+
+  const delSlug = el("input");
+  delSlug.dir = "ltr";
+  delSlug.placeholder = "نامک مستأجر برای تأیید حذف قطعی";
+  const delBtn = button(
+    "حذف قطعی حساب مالک",
+    safe(async () => {
+      if (!delSlug.value.trim()) return status("نامک مستأجر را وارد کنید.");
+      if (!(await confirmAction("حذف قطعی حساب مالک", "این عملیات برگشت‌ناپذیر است و ماندگاری فیزیکی PITR تا ۱۴ روز خواهد بود."))) return;
+      await request("/tenants/current/delete-account", "POST", {
+        confirmation_slug: delSlug.value.trim(),
+        acknowledge_irreversible: true,
+      });
+      location.assign("/");
+    }),
+    "btn-stop",
+  );
+
+  const leftCol = el("div", null, "stack");
+  leftCol.append(
+    card(
+      "گزارش ممیزی تغییرناپذیر (Audit Log)",
+      el("div", null, "toolbar"),
+      table(
+        [
+          ["عملیات", "action_code"],
+          ["نقش", "actor_role"],
+          ["زمان", r => date(r.created_at)],
+        ],
+        audits,
+      ),
+    ),
+    card(
+      "پشتیبان‌های ثبت‌شده (.rfbak)",
+      table(
+        [
+          ["دامنه", r => state(r.backup_scope)],
+          ["حجم", r => bytes(r.byte_size)],
+          ["زمان", r => date(r.created_at)],
+        ],
+        backups,
+      ),
+    ),
+  );
+  leftCol.firstChild.querySelector(".toolbar").append(csvBtn, jsonBtn, cleanBtn);
+
+  const rightCol = el("div", null, "stack");
+  rightCol.append(
+    card("تهیه پشتیبان رمزگذاری‌شده", wrapField("گذرواژه پشتیبان", bpPass), bpBtn),
+    card(
+      "منطقه خطرناک · حذف حساب مالک",
+      el("div", "حذف کامل حساب مالک و امحای کلید رمزنگاری مستأجر (Crypto-Shredding). دوره نگهداری فیزیکی PITR: ۱۴ روز.", "notice danger-zone"),
+      wrapField("تأیید نامک مستأجر", delSlug),
+      delBtn,
+    ),
+  );
+  const grid = el("div", null, "grid-2");
+  grid.append(leftCol, rightCol);
+  mount.replaceChildren(grid);
+}
+
+function wrapField(labelText, control) {
+  const wrap = el("label", null, "field");
+  wrap.append(el("span", labelText), control);
+  return wrap;
+}
+
+const RENDERERS = {
+  dashboard: renderDashboard,
+  sources: renderSources,
+  destinations: renderDestinations,
+  routes: renderRoutes,
+  content: renderContentStudio,
+  intelligence: renderIntelligence,
+  styles: renderStyles,
+  media: renderMedia,
+  ai: renderAI,
+  drafts: renderDrafts,
+  delivery: renderDelivery,
+  operations: renderOperations,
+};
 
 async function show(name) {
-  const [key,heading,endpoint]=views.find(item=>item[0]===name)||views[0], stamp=++generation;
-  current=key;
-  mediaTab="کتابخانه رسانه";
-  $("title").textContent=heading;
-  $("delivery-filters")?.remove();
-  const cache=new Map();
-  const load=path=>{
-    if(!cache.has(path)) cache.set(path,items(path).catch(error=>{cache.delete(path);throw error;}));
-    return cache.get(path);
-  };
-  const forms=(actions[key]||[]).filter(action=>key!=="dashboard"||action[1]!=="/ops/emergency-stop").map(action=>operation(action,load));
-  $("actions").replaceChildren(...forms);
-  $("results").replaceChildren(el("p","در حال بارگذاری…","empty"));
-  document.querySelectorAll("nav a").forEach(link=>{
-    if(link.dataset.view===key) link.setAttribute("aria-current","page");
+  const [key, heading] = views.find(item => item[0] === name) || views[0];
+  const stamp = ++generation;
+  current = key;
+  $("title").textContent = heading;
+  $("subtitle").textContent = SUBTITLES[key] || "";
+  $("actions").replaceChildren();
+  $("results").replaceChildren(el("p", "در حال بارگذاری…", "empty"));
+  document.querySelectorAll(".sidebar nav a").forEach(link => {
+    if (link.dataset.view === key) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   });
-  $("sidebar").classList.remove("open");$("menu").setAttribute("aria-expanded","false");
-  if(key==="sources") $("actions").append(archiveWizard());
-  if(key==="drafts") $("actions").prepend(el("p","پیش‌نمایش وب جایگزین نمایش در برنامه پیام‌رسان نیست.","notice"));
-  if(key==="operations") $("actions").prepend(el("p","نسخه‌های فیزیکی PITR تا ۱۴ روز نگهداری می‌شوند.","notice"));
-  if(key==="media"){
-    const tabs=el("div",null,"toolbar");
-    for(const [tab,indexes] of [["کتابخانه رسانه",[8]],["جست‌وجوی مجوزدار",[0]],["اینفوگرافیک",[1]],
-      ["استیکر و کلیپ",[2,3]],["پادکست",[4,5]],["کارها",[6,7]]]){
-      tabs.append(button(tab,attempt(async()=>{
-        mediaTab=tab;
-        forms.forEach((form,index)=>form.hidden=!indexes.includes(index));
-        if(tab==="کارها"){
-          const result=await query("/media/jobs");
-          if(stamp===generation) render(result,"/media/jobs");
-        }else if(tab==="کتابخانه رسانه") await refreshPane();
-      })));
-    }
-    $("actions").before(tabs);
-    tabs.id="media-tabs";forms.forEach((form,index)=>form.hidden=index!==8);
+  $("sidebar").classList.remove("open");
+  $("menu").setAttribute("aria-expanded", "false");
+  try {
+    await (RENDERERS[key] || renderDashboard)($("results"), stamp);
+  } catch (error) {
+    if (stamp === generation) $("results").replaceChildren(el("div", error.message, "notice danger-zone"));
   }
-  document.querySelectorAll("#media-tabs").forEach((node,index,array)=>{if(key!=="media"||index<array.length-1)node.remove();});
-  const effective=endpoint||(key==="intelligence"?"/channel-intelligence/analyses":null);
-  let deliveryStatus="";
-  if(key==="delivery"){
-    const filters=el("div",null,"toolbar");filters.id="delivery-filters";
-    for(const [name,caption] of [["","همه"],["UNCERTAIN","نامطمئن"],["FAILED","ناموفق"],["SENT","ارسال‌شده"],["SCHEDULED","زمان‌بندی‌شده"],["READY","آماده"]]){
-      const filter=button(caption,attempt(async()=>{
-        deliveryStatus=name;
-        filters.querySelectorAll("button").forEach(item=>item.setAttribute("aria-pressed",String(item===filter)));
-        await refreshPane();
-      }));
-      filter.setAttribute("aria-pressed",String(!name));filters.append(filter);
-    }
-    $("results").before(filters);
+}
+
+/* ================= BOOTSTRAP ================= */
+if (location.pathname.replace(/\/$/, "") === "/operator") {
+  mountOperator(status);
+} else {
+  const nav = document.querySelector(".sidebar nav");
+  for (const [index, [key, title]] of views.entries()) {
+    const link = el("a");
+    link.href = "/app/" + key;
+    link.dataset.view = key;
+    link.append(icon(index), document.createTextNode(title));
+    link.onclick = event => {
+      event.preventDefault();
+      history.pushState({}, "", link.href);
+      show(key);
+    };
+    nav.append(link);
   }
-  refreshPane=async ()=>{
-    cache.clear();
-    if(effective){
-      const path=key==="media"&&mediaTab==="کارها"?"/media/jobs":effective;
-      const listing=path==="/deliveries"&&deliveryStatus?path+"?status="+encodeURIComponent(deliveryStatus):path;
-      const value=path==="/dashboard"?await query(path):{items:await load(listing)};
-      if(stamp===generation) render(value,path);
-    }
-    if(stamp===generation) await Promise.allSettled(forms.map(form=>form.refreshPickers()));
-  };
-  try{await refreshPane();}catch(error){if(stamp===generation)$("results").replaceChildren(el("p",error.message,"notice"));}
 }
-if(location.pathname.replace(/\/$/,"")==="/operator") mountOperator(status);
-const nav=document.querySelector("nav");
-for(const [index,[key,title]] of views.entries()){
-  const link=el("a");link.href="/app/"+key;link.dataset.view=key;
-  link.append(icon(index),document.createTextNode(title));
-  link.onclick=event=>{event.preventDefault();history.pushState({},"",link.href);show(key);};
-  nav.append(link);
-}
+
 $("bell-icon").append(icon(12));
-$("bell").onclick=attempt(async()=>{
-  const drawer=$("notifications");
-  drawer.hidden=!drawer.hidden;$("bell").setAttribute("aria-expanded",String(!drawer.hidden));
-  if(!drawer.hidden) await openNotifications();
+$("bell").onclick = safe(async () => {
+  const drawer = $("notifications");
+  drawer.hidden = !drawer.hidden;
+  $("bell").setAttribute("aria-expanded", String(!drawer.hidden));
+  if (!drawer.hidden) {
+    const list = await fetchList("/notifications").catch(() => []);
+    drawer.replaceChildren(
+      el("h3", "مرکز اعلان‌ها"),
+      renderAlertsList(list, async () => {
+        await show(current);
+        drawer.hidden = true;
+      }),
+    );
+  }
 });
-$("stop").onclick=attempt(async()=>{
-  if(!await confirmAction("توقف اضطراری","ارسال‌های در انتظار لغو می‌شوند و موتور این فضا متوقف می‌شود."))return;
-  await request(scoped("/ops/emergency-stop"),"POST",{enabled:true,cancel_waiting:true});
-  await refreshDashboard();
+
+$("stop").onclick = safe(async () => {
+  if (!(await confirmAction("توقف اضطراری موتور", "تمام ارسال‌های در انتظار لغو شده و موتور این فضای کاری متوقف می‌شود."))) return;
+  await request(scoped("/ops/emergency-stop"), "POST", { enabled: true, cancel_waiting: true });
+  status("توقف اضطراری فعال شد.");
+  await show(current);
 });
-$("menu").onclick=()=>{$("menu").setAttribute("aria-expanded",String($("sidebar").classList.toggle("open")));};
-$("eye").onclick=()=>{
-  const input=$("login").elements.password, visible=input.type==="password";
-  input.type=visible?"text":"password";$("eye").textContent=visible?"پنهان کردن گذرواژه":"نمایش گذرواژه";
-  $("eye").setAttribute("aria-pressed",String(visible));
+
+$("menu").onclick = () => {
+  const open = $("sidebar").classList.toggle("open");
+  $("menu").setAttribute("aria-expanded", String(open));
 };
-window.onpopstate=()=>{if(workspace)show(location.pathname.split("/").pop());};
-$("workspace").onchange=attempt(async event=>{
-  workspace=event.target.value;eventCursor="";$("notifications").hidden=true;
-  await show(current);await refreshDashboard();
+
+$("eye").onclick = () => {
+  const input = $("login").elements.password;
+  const visible = input.type === "password";
+  input.type = visible ? "text" : "password";
+  $("eye").textContent = visible ? "پنهان" : "نمایش";
+  $("eye").setAttribute("aria-pressed", String(visible));
+};
+
+window.onpopstate = () => {
+  if (workspace) show(location.pathname.split("/").pop());
+};
+
+$("workspace").onchange = safe(async event => {
+  workspace = event.target.value;
+  eventCursor = "";
+  $("notifications").hidden = true;
+  await show(current);
 });
-$("logout").onclick=attempt(async()=>{
-  await request("/auth/logout","POST");
-  csrf="";workspace="";location.assign("/");
+
+$("logout").onclick = safe(async () => {
+  await request("/auth/logout", "POST");
+  csrf = "";
+  workspace = "";
+  location.assign("/");
 });
-$("login").onsubmit=attempt(async event=>{
+
+$("login").onsubmit = safe(async event => {
   event.preventDefault();
-  const form=event.target,data=Object.fromEntries(new FormData(form));
-  if(!data.tenant_slug)delete data.tenant_slug;
-  form.elements.password.value="";
-  const session=await request("/auth/login","POST",data);
-  csrf=session.csrf_token;workspace=session.default_workspace_id;
-  const response=await request("/workspaces");
-  setOptions($("workspace"),response.items,label,false);
-  $("workspace").value=workspace;
-  $("entry").hidden=true;$("studio").hidden=false;$("topbar").hidden=false;
-  history.replaceState({},"","/app/dashboard");await show("dashboard");
+  const form = event.target;
+  const data = Object.fromEntries(new FormData(form));
+  if (!data.tenant_slug) delete data.tenant_slug;
+  form.elements.password.value = "";
+  const session = await request("/auth/login", "POST", data);
+  csrf = session.csrf_token;
+  workspace = session.default_workspace_id;
+  const wsRes = await request("/workspaces");
+  setOptions($("workspace"), wsRes.items || [], itemLabel, false);
+  $("workspace").value = workspace;
+  $("entry").hidden = true;
+  $("studio").hidden = false;
+  $("topbar").hidden = false;
+  history.replaceState({}, "", "/app/dashboard");
+  await show("dashboard");
 });
-async function poll(){
-  try{
-    if(workspace&&!document.hidden){
-      const active=workspace,data=await query("/events/poll"+(eventCursor?"?cursor="+encodeURIComponent(eventCursor):""));
-      if(active===workspace){
-        if(data.items?.length){
-          eventCursor=data.items.at(-1).event_id;await refreshDashboard();
-          if(current==="delivery" || (current==="media"&&mediaTab==="کارها")) await refreshPane();
-        }
+
+async function poll() {
+  try {
+    if (workspace && !document.hidden) {
+      const active = workspace;
+      const data = await query("/events/poll" + (eventCursor ? "?cursor=" + encodeURIComponent(eventCursor) : ""));
+      if (active === workspace && data.items?.length) {
+        eventCursor = data.items.at(-1).event_id;
+        if (current === "dashboard") await show("dashboard");
       }
     }
-  }catch(error){status(error.message);}
-  finally{setTimeout(poll,12000);}
+  } catch {
+    // quiet background poll
+  } finally {
+    setTimeout(poll, 12000);
+  }
 }
-setTimeout(poll,12000);
+setTimeout(poll, 12000);

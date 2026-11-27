@@ -1,46 +1,108 @@
 <!doctype html>
 <html lang="fa" dir="rtl">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>استودیو رله‌فورج | RelayForge Studio</title>
 <link rel="stylesheet" href="/static/relayforge_ui/studio.css">
 <script type="module" src="/static/relayforge_ui/studio.js"></script>
 </head>
 <body>
 <header id="topbar" hidden>
-  <button id="menu" class="secondary mobile" aria-label="منو" aria-expanded="false">منو</button>
-  <a class="brand" href="/"><span class="mark" aria-hidden="true">R</span><span>استودیو رله‌فورج<small>RelayForge Studio</small></span></a>
-  <div class="tools">
-    <select aria-label="فضای کاری" id="workspace"></select>
-    <span class="pill" id="engine"></span>
-    <button class="secondary" id="bell" aria-label="اعلان‌ها" aria-expanded="false"><span id="bell-icon"></span><span id="unread"></span></button>
-    <button id="stop" class="danger">توقف اضطراری</button>
-    <a class="secondary button" href="/operator">پنل اپراتور</a>
-    <button id="logout" class="secondary">خروج</button>
+  <div class="topbar-right">
+    <button id="menu" class="icon-btn mobile" type="button" aria-label="منو" aria-expanded="false">منو</button>
+    <a class="brand" href="/app/dashboard">
+      <span class="mark" aria-hidden="true">R</span>
+      <span class="brand-text"><strong>استودیو رله‌فورج</strong><small>RelayForge Studio</small></span>
+    </a>
+  </div>
+  <div class="topbar-center">
+    <div class="ws-picker">
+      <span class="ws-label">فضای کاری:</span>
+      <select aria-label="فضای کاری" id="workspace"></select>
+    </div>
+    <span class="engine-pill" id="engine"><span class="dot" aria-hidden="true"></span><span id="engine-label">موتور: در حال اجرا</span></span>
+    <button id="stop" class="btn-stop" type="button">توقف اضطراری</button>
+  </div>
+  <div class="topbar-left">
+    <button class="bell-btn" id="bell" type="button" aria-label="اعلان‌ها" aria-expanded="false">
+      <span id="bell-icon"></span>
+      <span class="bell-badge" id="unread">۰</span>
+    </button>
+    <a class="btn-outline" href="/operator">پنل اپراتور</a>
+    <button id="logout" class="btn-outline" type="button">خروج</button>
   </div>
 </header>
-<main>
-  <section id="entry" class="auth">
-    <div class="mark" aria-hidden="true">R</div>
-    <p class="brand-label">استودیو رله‌فورج</p>
-    <h1>ورود به حساب کاربری</h1>
-    <form id="login">
-      <label>ایمیل <input name="email" type="email" dir="ltr" required autocomplete="username" placeholder="name@example.com"></label>
-      <label>شناسه مستأجر <small>اختیاری</small><input name="tenant_slug" dir="ltr" autocomplete="organization" placeholder="org-alpha"></label>
-      <label>گذرواژه <input name="password" type="password" dir="ltr" required autocomplete="current-password"></label>
-      <button type="button" id="eye" class="secondary" aria-pressed="false">نمایش گذرواژه</button>
-      <button type="submit">ورود به استودیو</button>
-    </form>
-    <a class="auth-footer" href="/operator">ورود به پنل اپراتور</a>
+
+<main id="app-main">
+  <section id="entry" class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <span class="mark mark-lg" aria-hidden="true">R</span>
+        <div class="auth-brand-title">استودیو رله‌فورج</div>
+        <div class="auth-brand-sub">RelayForge Studio</div>
+      </div>
+      <h1>ورود به حساب کاربری</h1>
+      <form id="login" class="auth-form">
+        <label class="field">
+          <span>ایمیل</span>
+          <input name="email" type="email" dir="ltr" required autocomplete="username" placeholder="example@company.ir">
+        </label>
+        <label class="field">
+          <span>شناسه مستأجر <small>(اختیاری)</small></span>
+          <input name="tenant_slug" dir="ltr" autocomplete="organization" placeholder="org-alpha">
+        </label>
+        <label class="field">
+          <span>گذرواژه</span>
+          <div class="password-row">
+            <input name="password" type="password" dir="ltr" required autocomplete="current-password" placeholder="••••••••">
+            <button type="button" id="eye" class="btn-ghost" aria-pressed="false">نمایش</button>
+          </div>
+        </label>
+        <button type="submit" class="btn-primary btn-block">ورود به استودیو</button>
+      </form>
+      <div class="auth-footer">
+        <a href="/operator">ورود به پنل سوپرادمین / اپراتور پلتفرم</a>
+      </div>
+    </div>
   </section>
-  <div id="studio" hidden>
-    <aside id="sidebar"><p class="nav-title">فضای کاری</p><nav aria-label="بخش‌های استودیو"></nav></aside>
-    <section id="view"><div class="heading"><p>استودیو / فضای کاری</p><h1 id="title"></h1></div><div id="results" tabindex="-1"></div><div id="actions"></div></section>
+
+  <div id="studio" class="studio-shell" hidden>
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-caption">منوی استودیو</span>
+      </div>
+      <nav aria-label="بخش‌های استودیو"></nav>
+    </aside>
+    <section id="view" class="view-pane">
+      <div class="view-header">
+        <div>
+          <h1 id="title">نمای کلی</h1>
+          <p id="subtitle" class="view-subtitle"></p>
+        </div>
+        <div id="view-header-actions" class="toolbar"></div>
+      </div>
+      <div id="results" tabindex="-1"></div>
+      <div id="actions"></div>
+    </section>
   </div>
-  <section id="operator" hidden></section>
+
+  <section id="operator" class="operator-shell" hidden></section>
 </main>
+
 <aside id="notifications" class="notification-drawer" hidden aria-label="اعلان‌ها"></aside>
-<dialog id="confirmation"><form method="dialog"><h2 id="confirmation-title"></h2><p id="confirmation-copy"></p><div class="toolbar"><button value="cancel" class="secondary" autofocus>انصراف</button><button value="confirm">تأیید عملیات</button></div></form></dialog>
-<div id="status" role="status" aria-live="polite" hidden></div>
+
+<dialog id="confirmation" class="modal-dialog">
+  <form method="dialog" class="modal-body">
+    <h2 id="confirmation-title">تأیید عملیات</h2>
+    <p id="confirmation-copy"></p>
+    <div class="modal-actions">
+      <button value="cancel" class="btn-outline" autofocus>انصراف</button>
+      <button value="confirm" class="btn-primary">تأیید و اجرا</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="status" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>
