@@ -16,3 +16,5 @@ main{max-inline-size:1530px;margin-inline:auto;padding:22px}.auth{max-inline-siz
 .infographic-row{display:grid;grid-template-columns:1fr 1fr auto;align-items:end;gap:6px;margin-block:8px}
 #delivery-filters{margin-block-end:10px}
 #delivery-filters button[aria-pressed=true]{background:var(--pale);border-color:var(--green2)}
+.steps{list-style:none;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px}
+.steps li{display:flex;justify-content:start;align-items:center;gap:6px;padding:9px}

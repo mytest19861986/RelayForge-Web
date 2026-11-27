@@ -141,7 +141,12 @@ function collection(endpoint,records) {
   const target=el("div");
   function show(query=""){
     const found=records.filter(row=>Object.values(row).some(value=>typeof value==="string"&&value.toLowerCase().includes(query.toLowerCase())));
-    target.replaceChildren(table(columns,found));
+    if(endpoint==="/styles"){
+      const cards=el("div",null,"cards");
+      found.forEach((row,index)=>cards.append(card(label(row,index),
+        el("p","نسخه "+fa(row.pinned_revision_no),"pill"),el("p",row.content_category))));
+      target.replaceChildren(found.length?cards:el("p","الگویی یافت نشد.","empty"));
+    } else target.replaceChildren(table(columns,found));
   }
   search.oninput=()=>show(search.value); node.append(search,target); show();return node;
 }
@@ -201,9 +206,20 @@ function render(value,path="",input="",targets=[],mount=$("results")) {
   if(base==="/dashboard") node=dashboard(value);
   else if(value?.candidates) node=contentComparison(value,input);
   else if(value?.statistical_summary_json) node=reportAnalysis(value);
+  else if(value?.before?.text!==undefined&&value?.after?.text!==undefined){
+    node=el("div",null,"comparison");
+    node.append(card("متن نمونه",el("p",value.before.text,"bubble")),
+      card("آزمایش سبک",el("p",value.after.text,"bubble")));
+  }
   else if(value?.destinations) {
     node=el("div");
-    if(path.endsWith("/dry-run")) node.append(el("p","۱. انتخاب محتوا ← ۲. اعمال قوانین ← ۳. پیش‌نمایش ← ۴. نتیجه","pill"),el("p",state(value.decision||"")));
+    if(path.endsWith("/dry-run")){
+      const steps=el("ol",null,"steps");
+      ["انتخاب محتوا","اعمال قوانین","پیش‌نمایش","گزارش نتیجه"].forEach((step,index)=>{
+        const line=el("li",null,"card");line.append(el("span",fa(index+1),"pill"),el("strong",step));steps.append(line);
+      });
+      node.append(steps,el("p",state(value.decision||"")));
+    }
     else node.append(el("p","پیش‌نمایش وب جایگزین نمایش در برنامه پیام‌رسان نیست.","notice"));
     node.append(previews(value.destinations,targets));
   } else if(value?.items) node=collection(base,value.items);
