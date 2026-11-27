@@ -1,4 +1,4 @@
-import {$, el, button, card, table, fa, ltr, state, date, confirmAction} from "./components.js";
+import {$, el, button, card, table, fa, ltr, statusPill, date, confirmAction} from "./components.js";
 
 export function mountOperator(status) {
   $("entry").hidden = true;
@@ -51,7 +51,7 @@ export function mountOperator(status) {
     login.hidden=true;
     consolePane.hidden=false;
   });
-  const login=card("ورود اپراتور",auth);
+  const login=card("ورود به پنل اپراتور",auth);
   const consolePane=el("div");
   consolePane.hidden=true;
   root.append(login,consolePane);
@@ -94,7 +94,7 @@ export function mountOperator(status) {
     if(generation!==renderVersion) return;
     const rows=response.items;
     list.replaceChildren(table([["نام مستأجر","display_name"],["نامک",item=>ltr(item.slug)],
-      ["وضعیت",item=>el("span",state(item.status),"pill")],["تاریخ ساخت",item=>date(item.created_at)],
+      ["وضعیت",item=>statusPill(item.status)],["تاریخ ساخت",item=>date(item.created_at)],
       ["سقف روزانه",item=>fa(item.daily_max_cost_micros)],["سقف ماهانه",item=>fa(item.monthly_max_cost_micros)],
       ["عملیات",item=>button("ویرایش سقف",()=>quota(item))]],rows));
     if(response.page_info?.next_cursor) list.append(button("صفحه بعد",()=>refresh(response.page_info.next_cursor).catch(error=>status(error.message))));

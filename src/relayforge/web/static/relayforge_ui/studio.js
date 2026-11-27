@@ -1,6 +1,6 @@
 import {views, actions} from "./views.js";
 import {mountOperator} from "./operator.js";
-import {$, el, fa, ltr, date, platform, state, icon, card, button, table, setOptions, confirmAction, download} from "./components.js";
+import {$, el, fa, ltr, date, platform, state, bytes, statusPill, icon, card, button, table, setOptions, confirmAction, download} from "./components.js";
 
 let csrf="", workspace="", current="", eventCursor="", toast, generation=0, refreshPane, mediaTab="";
 function status(text) {
@@ -49,9 +49,8 @@ function pickerPath(name,path) {
     if(path.startsWith(endpoint+"/")) return endpoint;
   }
 }
-const formatStatus = row => el("span",state(row.status||row.approval_state||row.is_enabled?.toString().toUpperCase()),"pill");
+const formatStatus = row => statusPill(row.status || row.approval_state || row.is_enabled?.toString().toUpperCase());
 const yesno = value => value ? "فعال" : "غیرفعال";
-const bytes = value => value == null ? "—" : fa(Math.round(value/1048576*10)/10)+" مگابایت";
 function meter(value,max) {
   const bar=el("progress"); bar.max=Math.max(1,max||0); bar.value=value||0;
   bar.setAttribute("aria-label","پیشرفت"); return bar;
@@ -59,13 +58,18 @@ function meter(value,max) {
 function notices(list) {
   if(!list?.length) return el("p","اعلان جدیدی وجود ندارد.","empty");
   const group=el("div");
-  for(const item of list) group.append(card(item.title_fa,el("p",item.body_fa),
-    el("span",fa(item.occurrence_count)+" بار","pill"),
-    ...(item.is_read?[]:[button("خواندم",attempt(async()=>{
-      await request(scoped("/notifications/"+item.id+"/read"),"POST",{});
-      await refreshDashboard();
-      if(!$("notifications").hidden) await openNotifications();
-    }))])));
+  for (const item of list) {
+    const toolbar = el("div", null, "toolbar notification-actions");
+    toolbar.append(el("span", fa(item.occurrence_count) + " بار", "pill"));
+    if (!item.is_read) {
+      toolbar.append(button("خواندم", attempt(async () => {
+        await request(scoped("/notifications/" + item.id + "/read"), "POST", {});
+        await refreshDashboard();
+        if (!$("notifications").hidden) await openNotifications();
+      })));
+    }
+    group.append(card(item.title_fa, el("p", item.body_fa), toolbar));
+  }
   return group;
 }
 async function openNotifications() {
@@ -236,7 +240,7 @@ function render(value,path="",input="",targets=[],mount=$("results")) {
   else if(value?.bundle_base64 || value?.manifest_id) node=card("پشتیبان رمزگذاری‌شده",
     value.bundle_base64?button("دانلود .rfbak",()=>download(Uint8Array.from(atob(value.bundle_base64),char=>char.charCodeAt(0)),"tenant.rfbak","application/octet-stream")):
       backupLink(value.manifest_id));
-  else if(value?.latency_ms!=null) node=card("نتیجه آزمون مدل",el("p",fa(value.latency_ms)+" میلی‌ثانیه"),el("span",state(value.status),"pill"));
+  else if(value?.latency_ms!=null) node=card("نتیجه آزمون مدل",el("p",fa(value.latency_ms)+" میلی‌ثانیه"),statusPill(value.status));
   else if(value?.webhook_token) node=card("اتصال وب‌هوک",el("p","کلید ثبت وب‌هوک را همین حالا در تنظیمات ربات وارد کنید."),ltr(value.webhook_token));
   else node=card("نتیجه",el("p",value?.status?state(value.status):"درخواست انجام شد."));
   mount.replaceChildren(node);

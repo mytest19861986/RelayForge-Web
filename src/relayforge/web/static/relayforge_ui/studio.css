@@ -18,3 +18,15 @@ main{max-inline-size:1530px;margin-inline:auto;padding:22px}.auth{max-inline-siz
 #delivery-filters button[aria-pressed=true]{background:var(--pale);border-color:var(--green2)}
 .steps{list-style:none;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px}
 .steps li{display:flex;justify-content:start;align-items:center;gap:6px;padding:9px}
+
+
+.card, #actions > form, .panel, h2, h3, p { text-align: start; }
+.metric { text-align: center; }
+.auth .brand-label, .auth-footer { text-align: center; }
+.auth-footer { display: block; margin-block-start: 16px; }
+.auth button[type="submit"] { width: 100%; }
+.auth #eye { justify-self: end; }
+fieldset { padding: 10px 12px 12px; margin-block: 4px; }
+fieldset > legend { padding-inline: 6px; }
+.table-wrap td bdi, .table-wrap td .pill { white-space: nowrap; overflow-wrap: normal; }
+.notification-actions { justify-content: space-between; }
