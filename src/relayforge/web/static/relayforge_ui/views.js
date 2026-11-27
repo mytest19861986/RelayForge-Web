@@ -93,9 +93,8 @@ export const actions = {
   ],
   media: [
     ["جستجوی رسانه دارای مجوز","/media/search","POST",[field("text","موضوع"),field("media_kind","نوع",["IMAGE","VIDEO"])],v=>v],
-    ["اینفوگرافیک","/media/jobs","POST",[title,field("labels","عنوان سطرها، هر سطر جدا","textarea"),
-      field("values","مقدار سطرها، هر سطر جدا","textarea")],
-    v=>({...media("INFOGRAPHIC_RENDER")(v),table_rows:v.labels.split("\n").map((item,i)=>[item,v.values.split("\n")[i]||""])})],
+    ["اینفوگرافیک","/media/jobs","POST",[title,field("table_rows","سطرهای اینفوگرافیک","rows")],
+    v=>({...media("INFOGRAPHIC_RENDER")(v),table_rows:v.table_rows})],
     ["استیکر بومی","/media/jobs","POST",[field("asset_ids","تصویر","pick")],media("NATIVE_STICKER")],
     ["کلیپ محلی FFmpeg","/media/jobs","POST",[field("asset_ids","تصاویر","multi"),field("caption","کپشن","text",true)],media("LOCAL_SLIDESHOW_CLIP")],
     ["ذخیره متن پادکست","/podcast-scripts","POST",[
@@ -154,7 +153,6 @@ export const actions = {
     ["انتشار نهایی","/drafts/{id}/publish","POST",[id,...choices()],publish("LIVE_PUBLISH"),true],
   ],
   delivery: [
-    ["فیلتر وضعیت","/deliveries?status={status}","GET",[field("status","وضعیت",["UNCERTAIN","READY","SENT","FAILED","SCHEDULED"])]],
     ["آشتی تحویل","/deliveries/{id}/reconcile","POST",[id,field("expected_lease_epoch","اجاره تحویل","derived"),
       field("resolution_action","تصمیم",["CONFIRM_SENT","CONFIRM_NOT_SENT_REQUEUE","DISCARD_DO_NOT_SEND"]),
       field("reason","دلیل"),field("acknowledge_duplicate_risk","ریسک ارسال تکراری را می‌پذیرم","checkbox")],

@@ -294,6 +294,22 @@ function operation([heading,path,method,fields,serialize,needsConfirm], load) {
   const controls=new Map(), records=new Map();
   const action=el("button",heading,heading.includes("آزمایشی")?"amber":heading.includes("فنی")?"violet":heading.includes("حذف حساب")?"danger":"");
   for(const [name,caption,kind,optional] of fields){
+    if(kind==="rows"){
+      const grid=el("fieldset");
+      grid.append(el("legend",caption));
+      function addRow(){
+        const row=el("div",null,"infographic-row");
+        for(const [name,title] of [["row_title","عنوان"],["row_value","مقدار"]]){
+          const wrap=el("label",title), input=el("input");
+          input.name=name;input.maxLength=140;input.required=true;
+          wrap.append(input);row.append(wrap);
+        }
+        row.append(button("حذف سطر",()=>{if(grid.querySelectorAll(".infographic-row").length>1)row.remove();}));
+        grid.insertBefore(row,add);
+      }
+      const add=button("افزودن سطر",()=>{if(grid.querySelectorAll(".infographic-row").length<12)addRow();});
+      grid.append(add);addRow();form.append(grid);continue;
+    }
     if(kind==="derived") continue;
     const wrapper=el("label",caption);
     if(kind==="freedom" || name==="resolution_action") {
@@ -389,6 +405,7 @@ function operation([heading,path,method,fields,serialize,needsConfirm], load) {
     const raw=new FormData(form), values=Object.fromEntries(raw);
     const owner=workspace, activeView=current;
     for(const [name,control] of controls) if(control.multiple) values[name]=raw.getAll(name);
+    if(raw.has("row_title"))values.table_rows=raw.getAll("row_title").map((title,index)=>[title,raw.getAll("row_value")[index]]);
     const selected=(records.get("id")||[]).find(row=>row.id===values.id);
     if(selected){
       values.revision=selected.current_revision_no;
@@ -445,6 +462,7 @@ async function show(name) {
   current=key;
   mediaTab="کتابخانه رسانه";
   $("title").textContent=heading;
+  $("delivery-filters")?.remove();
   const cache=new Map();
   const load=path=>{
     if(!cache.has(path)) cache.set(path,items(path).catch(error=>{cache.delete(path);throw error;}));
@@ -479,11 +497,25 @@ async function show(name) {
   }
   document.querySelectorAll("#media-tabs").forEach((node,index,array)=>{if(key!=="media"||index<array.length-1)node.remove();});
   const effective=endpoint||(key==="intelligence"?"/channel-intelligence/analyses":null);
+  let deliveryStatus="";
+  if(key==="delivery"){
+    const filters=el("div",null,"toolbar");filters.id="delivery-filters";
+    for(const [name,caption] of [["","همه"],["UNCERTAIN","نامطمئن"],["FAILED","ناموفق"],["SENT","ارسال‌شده"],["SCHEDULED","زمان‌بندی‌شده"],["READY","آماده"]]){
+      const filter=button(caption,attempt(async()=>{
+        deliveryStatus=name;
+        filters.querySelectorAll("button").forEach(item=>item.setAttribute("aria-pressed",String(item===filter)));
+        await refreshPane();
+      }));
+      filter.setAttribute("aria-pressed",String(!name));filters.append(filter);
+    }
+    $("results").before(filters);
+  }
   refreshPane=async ()=>{
     cache.clear();
     if(effective){
       const path=key==="media"&&mediaTab==="کارها"?"/media/jobs":effective;
-      const value=path==="/dashboard"?await query(path):{items:await load(path)};
+      const listing=path==="/deliveries"&&deliveryStatus?path+"?status="+encodeURIComponent(deliveryStatus):path;
+      const value=path==="/dashboard"?await query(path):{items:await load(listing)};
       if(stamp===generation) render(value,path);
     }
     if(stamp===generation) await Promise.allSettled(forms.map(form=>form.refreshPickers()));
